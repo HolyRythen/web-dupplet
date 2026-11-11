@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "golang.org/x/image/bmp"
@@ -345,12 +346,23 @@ var reHyphen = regexp.MustCompile(`(\p{L})[-\x{00AD}]\r?\n[ \t]*(\p{Ll})`)
 func dehyphen(s string) string { return reHyphen.ReplaceAllString(s, "$1$2") }
 
 // pdfImages zieht eingebettete Bilder heraus (JPEG bleibt JPEG, alles andere wird PNG).
+// Vorher listet pdfimages -list alle Bilder auf: Seiten, die nur 1-Bit-Bilder (eingescannte Schwarz-Weiß-Seiten)
+// oder winzige Bilder enthalten, werden gar nicht erst ausgepackt – deren Bilder würden ohnehin verworfen.
 func (t tools) pdfImages(ctx context.Context, file, dir string, maxImgs int) ([]string, error) {
 	if t.pdfimages == "" {
 		return nil, errors.New("pdfimages fehlt (Paket poppler-utils)")
 	}
-	// -l begrenzt die Seiten: bei eingescannten PDFs ist jede Seite ein Bild in voller Auflösung
-	if _, err := runTool(ctx, 3*time.Minute, t.pdfimages, "-q", "-j", "-png", "-l", strconv.Itoa(maxImgs), file, filepath.Join(dir, "img")); err != nil {
+	first, last := 0, 0
+	if out, err := runTool(ctx, time.Minute, t.pdfimages, "-list", "-l", "2000", file); err == nil {
+		first, last = pdfImagePages(string(out), maxImgs)
+		if first == 0 {
+			return nil, nil // keine auswertbaren Bilder
+		}
+	} else {
+		first, last = 1, maxImgs // Liste nicht lesbar: wie bisher die ersten Seiten auspacken
+	}
+	if _, err := runTool(ctx, 3*time.Minute, t.pdfimages, "-q", "-j", "-png", "-f", strconv.Itoa(first), "-l", strconv.Itoa(last),
+		file, filepath.Join(dir, "img")); err != nil {
 		return nil, err
 	}
 	ents, _ := os.ReadDir(dir)
@@ -364,7 +376,51 @@ func (t tools) pdfImages(ctx context.Context, file, dir string, maxImgs int) ([]
 	return out, nil
 }
 
+// pdfImagePages wertet die Ausgabe von „pdfimages -list“ aus und liefert den Seitenbereich mit den ersten
+// maxImgs auswertbaren Bildern (mehr als 1 Bit pro Farbe, mindestens minImgSide Pixel). 0,0 = keine.
+func pdfImagePages(list string, maxImgs int) (first, last int) {
+	n := 0
+	for _, line := range strings.Split(list, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 8 || f[2] != "image" {
+			continue
+		}
+		page, e1 := strconv.Atoi(f[0])
+		w, e2 := strconv.Atoi(f[3])
+		h, e3 := strconv.Atoi(f[4])
+		bpc, e4 := strconv.Atoi(f[7])
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || bpc <= 1 || w < minImgSide || h < minImgSide {
+			continue
+		}
+		if first == 0 {
+			first = page
+		}
+		last = page
+		if n++; n >= maxImgs {
+			break
+		}
+	}
+	return
+}
+
 // ---------- Video ----------
+
+const segParallel = 4 // gleichzeitige ffmpeg-Aufrufe pro Video/Audio
+
+// eachParallel ruft fn(0..n-1) mit höchstens k gleichzeitigen Aufrufen auf und wartet auf alle.
+func eachParallel(n, k int, fn func(i int)) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, k)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer func() { <-sem; wg.Done() }()
+			fn(i)
+		}(i)
+	}
+	wg.Wait()
+}
 
 // VideoFP: pHash je Einzelbild (0 = Bild unbrauchbar, z.B. schwarz) + Dauer + Vorschaubild.
 type VideoFP struct {
@@ -397,33 +453,41 @@ func (t tools) videoFingerprint(ctx context.Context, src, ua string, n int) (fp 
 	if err != nil || fp.Dur <= 0 {
 		return fp, errors.New("Videolänge unbekannt")
 	}
-	valid := 0
-	for i := 0; i < n; i++ {
+	// Einzelbilder parallel holen (bei Netz-Quellen wartet ffmpeg vor allem auf den Server)
+	fp.Frames = make([]uint64, n)
+	eachParallel(n+1, segParallel, func(i int) {
+		if i == n { // Vorschaubild aus der Mitte – läuft parallel zu den Einzelbildern
+			if jpg, err := runTool(ctx, 90*time.Second, t.ffmpeg, in("-ss", strconv.FormatFloat(fp.Dur/2, 'f', 3, 64), "-i", src,
+				"-frames:v", "1", "-vf", "scale=160:-2", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "6", "-")...); err == nil {
+				fp.Thumb = jpg
+			}
+			return
+		}
 		ts := fp.Dur * (float64(i) + 0.5) / float64(n)
 		raw, err := runTool(ctx, 90*time.Second, t.ffmpeg, in("-ss", strconv.FormatFloat(ts, 'f', 3, 64), "-i", src,
 			"-frames:v", "1", "-vf", "scale=32:32:flags=area,format=gray", "-f", "rawvideo", "-")...)
-		var h uint64
-		if err == nil && len(raw) == hashSide*hashSide {
-			px := make([]float64, len(raw))
-			for k, v := range raw {
-				px[k] = float64(v)
-			}
-			var ok bool
-			if h, ok = pHashGray(px); ok {
-				valid++
-			}
-		} else if err != nil && ctx.Err() != nil {
-			return fp, err
+		if err != nil || len(raw) != hashSide*hashSide {
+			return // Bild bleibt 0 (= nicht auswertbar)
 		}
-		fp.Frames = append(fp.Frames, h)
+		px := make([]float64, len(raw))
+		for k, v := range raw {
+			px[k] = float64(v)
+		}
+		if h, ok := pHashGray(px); ok {
+			fp.Frames[i] = h
+		}
+	})
+	if ctx.Err() != nil {
+		return fp, ctx.Err()
+	}
+	valid := 0
+	for _, h := range fp.Frames {
+		if h != 0 {
+			valid++
+		}
 	}
 	if valid < 2 {
 		return fp, errors.New("zu wenige auswertbare Einzelbilder")
-	}
-	// Vorschaubild aus der Mitte
-	if jpg, err := runTool(ctx, 90*time.Second, t.ffmpeg, in("-ss", strconv.FormatFloat(fp.Dur/2, 'f', 3, 64), "-i", src,
-		"-frames:v", "1", "-vf", "scale=160:-2", "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "6", "-")...); err == nil {
-		fp.Thumb = jpg
 	}
 	return fp, nil
 }

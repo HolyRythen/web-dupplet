@@ -254,3 +254,25 @@ func TestAudioFingerprintMitFFmpeg(t *testing.T) {
 		t.Errorf("anderes Stück gilt fälschlich als ähnlich (Score %.2f)", s)
 	}
 }
+
+func TestPdfImagePages(t *testing.T) {
+	liste := `page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   1     0 image    2480  3508  gray    1   1  ccitt  no         4  0   300   300  60K 5.6%
+   2     1 image    2480  3508  gray    1   1  ccitt  no         9  0   300   300  58K 5.5%
+   3     2 image     640   480  rgb     3   8  jpeg   no        14  0   150   150  41K 4.5%
+   3     3 smask     640   480  gray    1   8  image  no        15  0   150   150 2.1K 0.7%
+   4     4 image      16    16  rgb     3   8  image  no        19  0    72    72  204B  27%
+   7     5 image     800   600  gray    1   8  jpeg   no        24  0   200   200  30K 6.3%
+`
+	if f, l := pdfImagePages(liste, 60); f != 3 || l != 7 {
+		t.Errorf("Seiten %d–%d, erwartet 3–7", f, l)
+	}
+	if f, l := pdfImagePages(liste, 1); f != 3 || l != 3 {
+		t.Errorf("mit Höchstzahl 1: Seiten %d–%d, erwartet 3–3", f, l)
+	}
+	nurScans := strings.Join(strings.Split(liste, "\n")[:4], "\n")
+	if f, _ := pdfImagePages(nurScans, 60); f != 0 {
+		t.Errorf("nur Schwarz-Weiß-Scans: Seite %d, erwartet keine", f)
+	}
+}

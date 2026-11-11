@@ -37,7 +37,9 @@ type GNode struct {
 	Thumb     int64   `json:"thumb,omitempty"`
 	Keep      bool    `json:"keep"`
 	Manual    bool    `json:"manual,omitempty"`
-	Removable bool    `json:"removable"` // ganze Datei (nicht in Archiv/PDF eingebettet)
+	Removable bool    `json:"removable"`      // ganze Datei (nicht in Archiv/PDF eingebettet)
+	Same      bool    `json:"same,omitempty"` // byte-gleich zu einer anderen Datei der Gruppe → zählt bei „sicher“
+	fh        string
 }
 
 type Group struct {
@@ -217,7 +219,7 @@ func (a *Analyzer) buildGroups(ctx context.Context) (groupSet, error) {
 		r.Close()
 	}
 	stmt.Close()
-	fst, err := db.PrepareContext(ctx, `SELECT f.loc, f.kind, f.size, coalesce(a.mt, 0) FROM files f LEFT JOIN analysis a ON a.file_id = f.id WHERE f.id = ?`)
+	fst, err := db.PrepareContext(ctx, `SELECT f.loc, f.kind, f.size, coalesce(a.mt, 0), coalesce(f.fhash, x'') FROM files f LEFT JOIN analysis a ON a.file_id = f.id WHERE f.id = ?`)
 	if err != nil {
 		return gs, err
 	}
@@ -225,11 +227,12 @@ func (a *Analyzer) buildGroups(ctx context.Context) (groupSet, error) {
 		loc      string
 		kind, mt int
 		size     int64
+		fh       []byte
 	}
 	fi := map[int64]finfo{}
 	for f := range files {
 		var x finfo
-		fst.QueryRowContext(ctx, f).Scan(&x.loc, &x.kind, &x.size, &x.mt)
+		fst.QueryRowContext(ctx, f).Scan(&x.loc, &x.kind, &x.size, &x.mt, &x.fh)
 		fi[f] = x
 	}
 	fst.Close()
@@ -239,8 +242,22 @@ func (a *Analyzer) buildGroups(ctx context.Context) (groupSet, error) {
 		n.Loc, n.Local, n.MT = x.loc, x.kind == kindLocal, x.mt
 		if n.Sub == "" {
 			n.Size = x.size // ganze Datei: echte Dateigröße
+			n.fh = string(x.fh)
 		} else {
 			n.MT = classify(n.Sub)
+		}
+	}
+	// byte-gleiche Kopien (nicht analysiert) übernehmen Vorschau und Maße ihres Zwillings
+	twin := map[string]GNode{}
+	for _, n := range nodes {
+		if n.fh != "" && n.Thumb != 0 {
+			twin[n.fh] = n
+		}
+	}
+	for i := range nodes {
+		n := &nodes[i]
+		if t, ok := twin[n.fh]; ok && n.Thumb == 0 {
+			n.Thumb, n.W, n.H, n.Dur, n.Words, n.Snip = t.Thumb, t.W, t.H, t.Dur, t.Words, t.Snip
 		}
 	}
 	keep := map[nodeKey]bool{}
@@ -346,6 +363,9 @@ func chooseKeeper(g *Group) {
 		if x.Local != y.Local {
 			return x.Local
 		}
+		if ex, ey := extOf(x.Loc) != "", extOf(y.Loc) != ""; ex != ey {
+			return ex // sprechender Dateiname mit Endung
+		}
 		if x.Size != y.Size {
 			return x.Size > y.Size
 		}
@@ -357,12 +377,26 @@ func chooseKeeper(g *Group) {
 			k = i
 		}
 	}
+	// Ersparnis: jede überflüssige ganze Datei einmal; byte-gleiche Kopien (gleicher SHA-256) zählen schon
+	// bei den sicheren Duplikaten und werden hier nicht noch einmal gerechnet.
 	g.Savings = 0
+	seen := map[string]bool{}
+	if g.Nodes[k].fh != "" {
+		seen[g.Nodes[k].fh] = true
+	}
 	for i := range g.Nodes {
 		g.Nodes[i].Keep = i == k
-		if i != k && g.Nodes[i].Removable {
-			g.Savings += g.Nodes[i].Size
+		if i == k || !g.Nodes[i].Removable {
+			continue
 		}
+		if fh := g.Nodes[i].fh; fh != "" {
+			if seen[fh] {
+				g.Nodes[i].Same = true
+				continue
+			}
+			seen[fh] = true
+		}
+		g.Savings += g.Nodes[i].Size
 	}
 	// Behalten zuerst, danach nach Größe
 	sort.SliceStable(g.Nodes, func(i, j int) bool {
@@ -633,6 +667,10 @@ func (e *Engine) groupHandlers(mux *http.ServeMux) {
 				sel = append(sel, x)
 			}
 		}
+		counts := map[string]int{"0": len(g.groups)}
+		for _, x := range g.groups {
+			counts[strconv.Itoa(x.Kind)]++
+		}
 		total := len(sel)
 		if offset > len(sel) {
 			offset = len(sel)
@@ -641,7 +679,7 @@ func (e *Engine) groupHandlers(mux *http.ServeMux) {
 		if sel == nil {
 			sel = []Group{}
 		}
-		writeJSON(w, map[string]any{"groups": sel, "total": total, "savings": g.savings, "safeSavings": g.safeSavings,
+		writeJSON(w, map[string]any{"groups": sel, "total": total, "counts": counts, "savings": g.savings, "safeSavings": g.safeSavings,
 			"built": g.built.Unix()})
 	})
 

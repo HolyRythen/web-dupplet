@@ -57,9 +57,14 @@ func TestArchivVerwandtschaft(t *testing.T) {
 	var rels, shared, einzel int
 	e.rdb.QueryRow(`SELECT count(*), coalesce(max(shared),0) FROM arcrel`).Scan(&rels, &shared)
 	e.rdb.QueryRow(`SELECT count(*) FROM pairs p JOIN fps a ON a.id=p.a JOIN fps b ON b.id=p.b WHERE a.kind=4 AND b.kind=4`).Scan(&einzel)
-	// paket-1.0 ↔ paket-2.0 und spiegel/paket-1.0 ↔ paket-2.0; die Kopie untereinander nicht
-	if rels != 2 || shared != 3 {
-		t.Errorf("Verwandtschaften %d (erwartet 2), gemeinsam %d (erwartet 3)", rels, shared)
+	// nur paket-1.0 ↔ paket-2.0: die byte-gleiche Kopie wird gar nicht analysiert (steht bei den Duplikaten)
+	if rels != 1 || shared != 3 {
+		t.Errorf("Verwandtschaften %d (erwartet 1), gemeinsam %d (erwartet 3)", rels, shared)
+	}
+	var kopie int
+	e.rdb.QueryRow(`SELECT count(*) FROM analysis WHERE state=?`, anDup).Scan(&kopie)
+	if kopie != 1 {
+		t.Errorf("%d Archive als byte-gleiche Kopie übersprungen, erwartet 1", kopie)
 	}
 	if einzel != 0 {
 		t.Errorf("%d Einzelpaare zwischen Archiv-Einträgen, erwartet 0", einzel)
@@ -190,5 +195,26 @@ func TestRateLimiter(t *testing.T) {
 	}
 	if newRateLimiter(0) != nil {
 		t.Error("0 = unbegrenzt")
+	}
+}
+
+// Byte-gleiche Kopien werden nicht noch einmal analysiert (gleicher Fingerabdruck) – Ergebnis bleibt gleich.
+func TestByteGleicheKopieWirdNichtAnalysiert(t *testing.T) {
+	dir := t.TempDir()
+	orig := testBild(31, 900, 600)
+	var p, j bytes.Buffer
+	png.Encode(&p, orig)
+	jpeg.Encode(&j, verkleinere(orig, 450, 300), &jpeg.Options{Quality: 60})
+	for _, d := range []string{"a", "b", "c"} {
+		schreibe(t, filepath.Join(dir, d, "foto.png"), p.Bytes())
+	}
+	schreibe(t, filepath.Join(dir, "foto_klein.jpg"), j.Bytes())
+	e := laufeAnalyseMit(t, []string{dir}, nil, 4, nil)
+	var fertig, kopie, paare int
+	e.rdb.QueryRow(`SELECT count(*) FROM analysis WHERE state=?`, anDone).Scan(&fertig)
+	e.rdb.QueryRow(`SELECT count(*) FROM analysis WHERE state=?`, anDup).Scan(&kopie)
+	e.rdb.QueryRow(`SELECT count(*) FROM pairs`).Scan(&paare)
+	if fertig != 2 || kopie != 2 || paare != 1 {
+		t.Errorf("analysiert %d (erwartet 2), als Kopie übersprungen %d (erwartet 2), Paare %d (erwartet 1)", fertig, kopie, paare)
 	}
 }

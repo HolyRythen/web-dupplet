@@ -62,6 +62,7 @@ const (
 	anSkip   = 2 // kein analysierbarer Dateityp
 	anTooBig = 3 // größer als -sim-max
 	anNoFP   = 4 // analysiert, aber nichts Vergleichbares (einfarbiges Bild, sehr kurzer Text …)
+	anDup    = 5 // byte-gleiche Kopie einer schon analysierten Datei: gleicher Fingerabdruck, nicht nötig
 	anRetry  = 8 // vorübergehender Fehler, wird später wiederholt
 	anFail   = 9
 )
@@ -544,8 +545,11 @@ func (a *Analyzer) dispatch(ctx context.Context) {
 			}
 		}
 		// 2. neue Dateien
+		// Dateien, über die Stufe 2/3 noch entscheidet (gleiche Größe bzw. gleicher Teil-Hash wie eine andere),
+		// kommen erst danach dran: Ist sie eine byte-gleiche Kopie, muss sie gar nicht analysiert werden.
 		rs, err := a.e.rdb.QueryContext(ctx, `SELECT f.id, f.loc, f.kind, f.size, f.fhash FROM files f
 			WHERE f.id > ? AND f.size >= 0 AND f.state BETWEEN 1 AND 3
+			  AND NOT ((f.state = 1 AND f.need >= 1) OR (f.state = 2 AND f.need = 2))
 			  AND NOT EXISTS (SELECT 1 FROM analysis x WHERE x.file_id = f.id)
 			ORDER BY f.id LIMIT 500`, cursor)
 		if err != nil {
@@ -592,6 +596,10 @@ func (a *Analyzer) send(ctx context.Context, r dispRow, quick *[][3]int64) bool 
 	if _, busy := a.inflight.Load(r.id); busy {
 		return true
 	}
+	if quick != nil && len(r.fhash) > 0 && a.copyAnalyzed(r.id, r.fhash) {
+		*quick = append(*quick, [3]int64{r.id, anDup, int64(classify(r.loc))})
+		return true
+	}
 	mt := classify(r.loc)
 	snf := mt == mtNone && (r.kind == kindLocal || extOf(r.loc) == "")
 	needWhole := a.hasMembers.Load() && r.size >= minExact && a.memberWithSize(r.size)
@@ -618,6 +626,25 @@ func (a *Analyzer) send(ctx context.Context, r dispRow, quick *[][3]int64) bool 
 		a.inflight.Delete(r.id)
 		return false
 	}
+}
+
+// copyAnalyzed: Gibt es eine byte-gleiche Datei, deren Analyse schon fertig ist (oder gerade läuft)?
+func (a *Analyzer) copyAnalyzed(id int64, fhash []byte) bool {
+	rows, err := a.e.rdb.Query(`SELECT f.id, coalesce(x.state, 0) FROM files f LEFT JOIN analysis x ON x.file_id = f.id
+		WHERE f.fhash = ? AND f.id <> ? LIMIT 20`, fhash, id)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var other int64
+		var st int
+		rows.Scan(&other, &st)
+		if _, busy := a.inflight.Load(other); busy || st == anDone || st == anNoFP || st == anSkip || st == anTooBig {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Analyzer) memberWithSize(size int64) bool {
@@ -1380,6 +1407,7 @@ type SimStats struct {
 	Done        int64    `json:"done"`
 	Skipped     int64    `json:"skipped"`
 	NoFP        int64    `json:"noFP"`
+	Dup         int64    `json:"dup"`
 	TooBig      int64    `json:"tooBig"`
 	Retry       int64    `json:"retry"`
 	Failed      int64    `json:"failed"`
@@ -1402,14 +1430,14 @@ type SimStats struct {
 
 func (a *Analyzer) stats(base Stats) *SimStats {
 	s := &SimStats{
-		Done: a.cnt[anDone].Load(), Skipped: a.cnt[anSkip].Load(), NoFP: a.cnt[anNoFP].Load(),
+		Done: a.cnt[anDone].Load(), Skipped: a.cnt[anSkip].Load(), NoFP: a.cnt[anNoFP].Load(), Dup: a.cnt[anDup].Load(),
 		TooBig: a.cnt[anTooBig].Load(), Retry: a.cnt[anRetry].Load(), Failed: a.cnt[anFail].Load(),
 		Active: a.active.Load(), ActiveMedia: a.activeMedia.Load(), QueuedMedia: len(a.mediaJobs),
 		PairsImage: a.pairs[pkImage].Load(), PairsText: a.pairs[pkText].Load(),
 		PairsVideo: a.pairs[pkVideo].Load(), PairsAudio: a.pairs[pkAudio].Load(), PairsArch: a.pairs[pkArchive].Load(),
 		ArcRels: a.arcRels.Load(),
 	}
-	s.Analyzed = s.Done + s.Skipped + s.NoFP + s.TooBig + s.Retry + s.Failed
+	s.Analyzed = s.Done + s.Skipped + s.NoFP + s.Dup + s.TooBig + s.Retry + s.Failed
 	s.Pairs = s.PairsImage + s.PairsText + s.PairsVideo + s.PairsAudio + s.PairsArch
 	// Dateien mit bekannter Größe, die noch keine Analyse haben (Näherung)
 	s.Pending = max(0, base.Total-base.NeedProbe-base.Errors-s.Analyzed)

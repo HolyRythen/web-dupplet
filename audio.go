@@ -134,8 +134,8 @@ func (t tools) audioFingerprint(ctx context.Context, src, ua string, n int) (fp 
 	if seg < 1 {
 		return fp, errors.New("Audio zu kurz")
 	}
-	valid := 0
-	for i := 0; i < n; i++ {
+	fp.Segs = make([]uint64, n)
+	eachParallel(n, segParallel, func(i int) {
 		ts := max(0, fp.Dur*(float64(i)+0.5)/float64(n)-seg/2)
 		a := []string{"-nostdin", "-hide_banner", "-loglevel", "error"}
 		if isURL {
@@ -144,20 +144,25 @@ func (t tools) audioFingerprint(ctx context.Context, src, ua string, n int) (fp 
 		a = append(a, "-ss", strconv.FormatFloat(ts, 'f', 3, 64), "-t", strconv.FormatFloat(seg, 'f', 3, 64),
 			"-i", src, "-vn", "-ac", "1", "-ar", strconv.Itoa(audioSR), "-f", "s16le", "-")
 		raw, err := runTool(ctx, 90*time.Second, t.ffmpeg, a...)
-		var h uint64
-		if err == nil {
-			s := make([]int16, len(raw)/2)
-			for k := range s {
-				s[k] = int16(binary.LittleEndian.Uint16(raw[2*k:]))
-			}
-			var ok bool
-			if h, ok = audioSegHash(s); ok {
-				valid++
-			}
-		} else if ctx.Err() != nil {
-			return fp, err
+		if err != nil {
+			return
 		}
-		fp.Segs = append(fp.Segs, h)
+		s := make([]int16, len(raw)/2)
+		for k := range s {
+			s[k] = int16(binary.LittleEndian.Uint16(raw[2*k:]))
+		}
+		if h, ok := audioSegHash(s); ok {
+			fp.Segs[i] = h
+		}
+	})
+	if ctx.Err() != nil {
+		return fp, ctx.Err()
+	}
+	valid := 0
+	for _, h := range fp.Segs {
+		if h != 0 {
+			valid++
+		}
 	}
 	if valid < 2 {
 		return fp, errors.New("zu wenige auswertbare Ausschnitte (Stille?)")

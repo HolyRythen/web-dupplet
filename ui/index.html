@@ -67,25 +67,40 @@ details summary{cursor:pointer;font-weight:600}
 .errl{font:12px var(--mono);max-height:300px;overflow:auto;margin-top:8px}
 .errl div{padding:4px 0;border-bottom:1px solid var(--line);word-break:break-all}
 .errl span{color:var(--err)}
-.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 4px}
 .tabs button{padding:5px 12px;font-size:13px}
 .tabs button.on{background:var(--acc);border-color:var(--acc);color:#fff}
-.pair{display:grid;grid-template-columns:1fr 96px 1fr;gap:14px;padding:14px 0;border-bottom:1px solid var(--line);align-items:start}
-.pair:last-child{border-bottom:0}
-.side{min-width:0}
-.side img{display:block;max-width:100%;width:180px;height:auto;border-radius:8px;background:var(--bg);border:1px solid var(--line);margin-bottom:6px}
-.side .snip{font-size:12px;color:var(--mute);background:var(--bg);border-radius:8px;padding:8px 10px;max-height:118px;overflow:hidden;margin-bottom:6px}
-.side .loc{font:12px var(--mono);word-break:break-all}
-.side .loc a{color:var(--fg);text-decoration:none}
-.side .loc a:hover{color:var(--acc);text-decoration:underline}
-.side .meta{font-size:12px;color:var(--mute);margin-top:2px}
-.side .in{font:12px var(--mono);color:var(--part);word-break:break-all}
-.score{text-align:center;padding-top:6px}
-.score b{display:block;font-size:22px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--warn)}
-.score b.hi{color:var(--dup)}
-.score span{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.04em}
+.tabs button small{opacity:.75;margin-left:4px;font-variant-numeric:tabular-nums}
+.save{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:6px 0 4px}
+.save div{background:var(--bg);border-radius:8px;padding:12px 14px}
+.save b{display:block;font-size:22px;font-weight:650;font-variant-numeric:tabular-nums}
+.save span{font-size:12px;color:var(--mute)}
+.save .safe b{color:var(--ok)}.save .check b{color:var(--warn)}
+.grp{border-top:1px solid var(--line);padding:14px 0}
+.grp:first-child{border-top:0}
+.grp h3{font-size:13px;font-weight:600;margin:0 0 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:baseline}
+.grp h3 .msg{font-weight:400}
+.grp h3 .spart{color:var(--dup);font-variant-numeric:tabular-nums}
+.nodes{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}
+.node{border:1px solid var(--line);border-radius:10px;padding:10px;min-width:0;background:var(--card);display:flex;flex-direction:column;gap:5px}
+.node.keep{border-color:var(--ok);box-shadow:inset 0 0 0 1px var(--ok)}
+.node img{display:block;width:100%;height:120px;object-fit:contain;border-radius:6px;background:var(--bg)}
+.node .snip{font-size:12px;color:var(--mute);background:var(--bg);border-radius:6px;padding:7px 9px;height:96px;overflow:hidden}
+.node .ph{height:56px;border-radius:6px;background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--mute)}
+.node .loc{font:12px var(--mono);word-break:break-all}
+.node .loc a{color:var(--fg);text-decoration:none}.node .loc a:hover{color:var(--acc);text-decoration:underline}
+.node .in{font:11px var(--mono);color:var(--part);word-break:break-all}
+.node .meta{font-size:12px;color:var(--mute)}
+.node .act{margin-top:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px}
+.badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px}
+.badge.k{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.badge.d{background:color-mix(in srgb,var(--dup) 16%,transparent);color:var(--dup)}
+.badge.e{background:var(--line);color:var(--mute)}
+.node .act button{padding:3px 10px;font-size:12px}
+audio{width:100%;height:32px}
 .warnbox{margin-top:10px;font-size:13px;color:var(--warn)}
-@media(max-width:700px){.pair{grid-template-columns:1fr}.score{text-align:left;padding:0}.score b{display:inline;margin-right:8px}}
+.rel td.files{font:12px var(--mono);word-break:break-all}
+@media(max-width:700px){.save{grid-template-columns:1fr}.nodes{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
@@ -166,24 +181,32 @@ details summary{cursor:pointer;font-weight:600}
   </div>
 
   <div class="card" style="margin-bottom:12px" id="simCard" hidden>
-    <h2>Ähnlichkeitsanalyse <span class="msg" style="font-weight:400">· Bilder, Videos, Texte, PDFs, Office, Archive</span></h2>
+    <div class="row" style="margin:0 0 10px"><h2 style="margin:0">Ähnlichkeitsanalyse <span class="msg" style="font-weight:400">· Bilder, Videos, Audio, Texte, PDFs, Office, Archive</span></h2>
+      <div class="sp"></div><button id="retryBtn" hidden>Fehler erneut versuchen</button></div>
     <div class="pipe">
       <div><b id="sDone">–</b><span>mit Fingerabdruck</span></div>
       <div><b id="sPend">–</b><span>noch offen</span></div>
       <div><b id="sAct">–</b><span>gerade aktiv</span></div>
-      <div><b id="sPairs">–</b><span>ähnliche Paare</span></div>
+      <div><b id="sMedia">–</b><span>Video/Audio in Arbeit · wartend</span></div>
     </div>
     <p class="msg" style="margin:12px 0 0" id="sInfo"></p>
     <div class="warnbox" id="sMissing" hidden></div>
   </div>
 
-  <div class="card" style="margin-bottom:12px" id="pairCard" hidden>
-    <div class="row" style="margin:0 0 6px"><h2 style="margin:0">Ähnliche Inhalte</h2><span class="msg" id="pInfo"></span><div class="sp"></div>
-      <a class="btn" href="api/similar.csv">CSV</a><button id="pPrev">‹</button><button id="pNext">›</button></div>
-    <div class="tabs" id="pTabs">
-      <button data-k="0" class="on">Alle</button><button data-k="1">Bilder</button><button data-k="3">Videos</button><button data-k="2">Texte &amp; Dokumente</button><button data-k="4">In Archiven</button>
+  <div class="card" style="margin-bottom:12px" id="grpCard" hidden>
+    <div class="row" style="margin:0"><h2 style="margin:0">Aufräumen</h2><span class="msg" id="gInfo2"></span><div class="sp"></div>
+      <a class="btn" href="api/cleanup.csv" title="Alle Gruppen mit Vorschlag behalten/löschen">Liste (CSV)</a>
+      <a class="btn" href="api/cleanup.sh" title="Verschiebt überflüssige lokale Kopien in einen Ordner – Probelauf, bis AUSFUEHREN=1 gesetzt ist">Aufräum-Skript</a></div>
+    <div class="save">
+      <div class="safe"><b id="svSafe">–</b><span>sicher frei: byte-gleiche Duplikate</span></div>
+      <div class="check"><b id="svSim">–</b><span>möglich: ähnliche Inhalte (bitte prüfen)</span></div>
     </div>
-    <div id="pairs"><div class="empty">Noch keine ähnlichen Inhalte gefunden.</div></div>
+    <div class="tabs" id="gTabs">
+      <button data-k="0" class="on">Alle<small id="tc0"></small></button><button data-k="1">Bilder<small id="tc1"></small></button><button data-k="3">Videos<small id="tc3"></small></button><button data-k="5">Audio<small id="tc5"></small></button><button data-k="2">Texte &amp; Dokumente<small id="tc2"></small></button><button data-k="4">Verpackt<small id="tc4"></small></button><button data-k="rel">Verwandte Archive<small id="tcr"></small></button>
+    </div>
+    <p class="msg" id="gHint" style="margin:4px 0 0">★ = Vorschlag zum Behalten (höchste Auflösung bzw. Qualität, vollständigstes Format). Mit „behalten“ wählst du ein anderes Exemplar.</p>
+    <div id="grps"><div class="empty">Noch keine ähnlichen Inhalte gefunden.</div></div>
+    <div class="row" style="justify-content:flex-end"><span class="msg" id="gPage"></span><button id="gPrev">‹</button><button id="gNext">›</button></div>
   </div>
 
   <div class="card">
@@ -301,55 +324,89 @@ $('scanBtn').onclick = async ()=>{
   $('addMsg').textContent = r.ok ? 'Ordner-Scan gestartet' : await r.text();
 };
 
-// ---------- Ähnlichkeit ----------
-let pKind=0, pOffset=0, lastPairs=-1;
-const PLIMIT=20;
-const KIND={1:'Bild',2:'Text',3:'Video',4:'exakt, verpackt'};
+// ---------- Ähnlichkeit & Aufräumen ----------
+let gKind='0', gOffset=0, lastSig='';
+const GLIMIT=15;
+const GKIND={1:'Bilder',2:'Texte',3:'Videos',4:'verpackt (exakt)',5:'Audio'};
 function simStats(sim){
-  $('simCard').hidden = !sim; $('pairCard').hidden = !sim;
+  $('simCard').hidden = !sim; $('grpCard').hidden = !sim;
   if(!sim) return;
   $('sDone').textContent = n(sim.done);
   $('sPend').textContent = n(sim.pending);
   $('sAct').textContent = n(sim.active);
-  $('sPairs').textContent = n(sim.pairs);
-  $('sInfo').textContent = `${n(sim.analyzed)} Dateien angeschaut · ${n(sim.skipped)} ohne passenden Typ · ${n(sim.noFP)} ohne verwertbaren Inhalt · ${n(sim.tooBig)} zu groß · ${n(sim.failed)} Fehler`
-    + ` · Paare: ${n(sim.pairsImage)} Bilder, ${n(sim.pairsVideo)} Videos, ${n(sim.pairsText)} Texte, ${n(sim.pairsArchive)} in Archiven`;
+  $('sMedia').textContent = `${n(sim.activeMedia)} · ${n(sim.queuedMedia)}`;
+  $('sInfo').textContent = `${n(sim.analyzed)} Dateien angeschaut · ${n(sim.dup)} byte-gleiche Kopien übersprungen · ${n(sim.skipped)} ohne passenden Typ · ${n(sim.noFP)} ohne verwertbaren Inhalt · ${n(sim.tooBig)} zu groß · ${n(sim.retry)} warten auf Wiederholung · ${n(sim.failed)} Fehler`;
+  $('retryBtn').hidden = !sim.failed;
   $('sMissing').hidden = !sim.missing;
   if(sim.missing) $('sMissing').textContent = 'Fehlende Programme auf dem Server: '+sim.missing.join(', ')+' – die betroffenen Dateitypen werden übersprungen.';
-  if(sim.pairs !== lastPairs){ lastPairs = sim.pairs; similar(); }
+  $('svSafe').textContent = bytes(sim.safeSavings);
+  $('svSim').textContent = bytes(sim.savings);
+  $('gInfo2').textContent = `${n(sim.groups)} Gruppen · ${n(sim.arcRels)} verwandte Archive`;
+  $('tcr').textContent = sim.arcRels ? n(sim.arcRels) : '';
+  const sig = [sim.groups, sim.savings, sim.pairs, sim.arcRels].join('/');
+  if(sig !== lastSig){ lastSig = sig; showGroups(); }
 }
-function side(x){
+function mediaTag(x){
+  if(x.thumb) return `<img src="api/thumb?fp=${x.thumb}" alt="" loading="lazy">`;
+  if(x.snip) return `<div class="snip">${esc(x.snip)}</div>`;
+  if(x.mt===7 && !x.sub && /^https?:/.test(x.loc)) return `<audio controls preload="none" src="${esc(x.loc)}"></audio>`;
+  return `<div class="ph">${esc((x.sub||x.loc).split(/[\/]/).pop().split('.').pop().toUpperCase())}</div>`;
+}
+function nodeHTML(x, g){
   const loc = /^https?:/.test(x.loc) ? `<a href="${esc(x.loc)}" target="_blank" rel="noopener noreferrer">${esc(x.loc)}</a>` : esc(x.loc);
   const meta = [bytes(x.size)];
   if(x.w) meta.push(`${n(x.w)}×${n(x.h)} px`);
-  if(x.dur) meta.push(dur(x.dur).replace(/^0 min$/,Math.round(x.dur)+' s'));
+  if(x.dur) meta.push(x.dur>=60 ? dur(x.dur) : Math.round(x.dur)+' s');
   if(x.words) meta.push(n(x.words)+' Wörter');
-  return `<div class="side">
-    ${x.thumb?`<img src="api/thumb?fp=${x.thumb}" alt="" loading="lazy">`:''}
-    ${x.snip?`<div class="snip">${esc(x.snip)}</div>`:''}
-    <div class="loc">${loc}</div>
-    ${x.sub?`<div class="in">↳ ${esc(x.sub)}</div>`:''}
-    <div class="meta">${meta.join(' · ')}</div></div>`;
+  let act;
+  if(x.keep) act = `<span class="badge k">★ behalten${x.manual?' (deine Wahl)':''}</span>`;
+  else if(!x.removable) act = `<span class="badge e">eingebettet – bleibt</span>`;
+  else if(x.same) act = `<span class="badge e">byte-gleiche Kopie – siehe Duplikate</span><button data-file="${x.file}" data-sub="">behalten</button>`;
+  else act = `<span class="badge d">kann weg</span><button data-file="${x.file}" data-sub="${esc(x.sub||'')}">behalten</button>`;
+  return `<div class="node${x.keep?' keep':''}">${mediaTag(x)}<div class="loc">${loc}</div>${x.sub?`<div class="in">↳ ${esc(x.sub)}</div>`:''}<div class="meta">${meta.join(' · ')}</div><div class="act">${act}</div></div>`;
 }
-async function similar(){
-  const d = await (await fetch(`api/similar?kind=${pKind}&limit=${PLIMIT}&offset=${pOffset}`)).json();
-  const ps = d.pairs||[];
-  $('pInfo').textContent = d.total ? `${n(pOffset+1)}–${n(pOffset+ps.length)} von ${n(d.total)} · ähnlichste zuerst` : '';
-  $('pPrev').disabled = pOffset===0; $('pNext').disabled = pOffset+PLIMIT >= d.total;
-  if(!ps.length){ $('pairs').innerHTML='<div class="empty">Noch keine ähnlichen Inhalte gefunden.</div>'; return; }
-  $('pairs').innerHTML = ps.map(p=>{
-    const pct = Math.round(p.score*1000)/10;
-    return `<div class="pair">${side(p.a)}<div class="score"><b class="${pct>=97?'hi':''}">${pct.toLocaleString('de-DE')} %</b><span>${KIND[p.kind]||''}</span></div>${side(p.b)}</div>`;
+async function showGroups(){
+  if(gKind==='rel') return showRels();
+  const d = await (await fetch(`api/clusters?kind=${gKind}&limit=${GLIMIT}&offset=${gOffset}`)).json();
+  const gs = d.groups||[];
+  $('gHint').hidden = false;
+  $('gPage').textContent = d.total ? `${n(gOffset+1)}–${n(gOffset+gs.length)} von ${n(d.total)} · größte Ersparnis zuerst` : '';
+  $('gPrev').disabled = gOffset===0; $('gNext').disabled = gOffset+GLIMIT >= d.total;
+  for(const k of ['0','1','2','3','4','5']){ const c=(d.counts||{})[k]||0; $('tc'+k).textContent = c ? n(c) : ''; }
+  if(!gs.length){ $('grps').innerHTML='<div class="empty">Keine Gruppen in dieser Ansicht.</div>'; return; }
+  $('grps').innerHTML = gs.map(g=>{
+    const lo=Math.round(g.minScore*100), hi=Math.round(g.maxScore*100);
+    return `<div class="grp"><h3>Gruppe ${n(g.id)} · ${GKIND[g.kind]||''} · ${g.nodes.length} Exemplare <span class="msg">${lo===hi?lo:lo+'–'+hi} % ähnlich</span>${g.savings?`<span class="spart">spart ${bytes(g.savings)}</span>`:''}</h3>
+      <div class="nodes">${g.nodes.map(x=>nodeHTML(x,g)).join('')}</div></div>`;
   }).join('');
 }
-$('pTabs').addEventListener('click', e=>{
-  const k = e.target.dataset && e.target.dataset.k; if(k===undefined) return;
-  pKind=+k; pOffset=0;
-  for(const b of $('pTabs').children) b.classList.toggle('on', b===e.target);
-  similar();
+async function showRels(){
+  const d = await (await fetch(`api/arcrels?limit=${GLIMIT}&offset=${gOffset}`)).json();
+  const rs = d.rels||[];
+  $('gHint').hidden = true;
+  $('gPage').textContent = d.total ? `${n(gOffset+1)}–${n(gOffset+rs.length)} von ${n(d.total)}` : '';
+  $('gPrev').disabled = gOffset===0; $('gNext').disabled = gOffset+GLIMIT >= d.total;
+  if(!rs.length){ $('grps').innerHTML='<div class="empty">Keine verwandten Archive (byte-gleiche Archive stehen bei den Duplikat-Gruppen).</div>'; return; }
+  const pct=(a,b)=> b ? Math.round(100*a/b)+' %' : '–';
+  $('grps').innerHTML = `<div class="tbl"><table class="rel"><thead><tr><th>Archive</th><th style="text-align:right">gemeinsame Dateien</th><th style="text-align:right">Anteil</th><th style="text-align:right">gemeinsam</th></tr></thead><tbody>${
+    rs.map(r=>`<tr><td class="files"><div>${esc(r.a)}</div><div>${esc(r.b)}</div></td><td class="n">${n(r.shared)}</td><td class="n">${pct(r.shared,r.membersA)}<br>${pct(r.shared,r.membersB)}</td><td class="n">${bytes(r.sharedBytes)}</td></tr>`).join('')
+  }</tbody></table></div><p class="msg">Archive, die viele Dateien teilen (z. B. zwei Versionen eines Pakets). Anteil = gemeinsame Dateien je Archiv.</p>`;
+}
+$('grps').addEventListener('click', async e=>{
+  const b = e.target.closest('button[data-file]'); if(!b) return;
+  b.disabled = true;
+  await fetch('api/keep',{method:'POST',body:JSON.stringify({file:+b.dataset.file, sub:b.dataset.sub})});
+  showGroups();
 });
-$('pPrev').onclick = ()=>{ pOffset=Math.max(0,pOffset-PLIMIT); similar(); };
-$('pNext').onclick = ()=>{ pOffset+=PLIMIT; similar(); };
+$('gTabs').addEventListener('click', e=>{
+  const b = e.target.closest('button'); if(!b) return;
+  gKind = b.dataset.k; gOffset = 0;
+  for(const x of $('gTabs').children) x.classList.toggle('on', x===b);
+  showGroups();
+});
+$('gPrev').onclick = ()=>{ gOffset=Math.max(0,gOffset-GLIMIT); showGroups(); };
+$('gNext').onclick = ()=>{ gOffset+=GLIMIT; showGroups(); };
+$('retryBtn').onclick = async ()=>{ $('retryBtn').disabled=true; await fetch('api/similar/retry',{method:'POST'}); $('retryBtn').disabled=false; stats(); };
 
 stats(); setInterval(stats, 1000);
 </script>

@@ -53,9 +53,10 @@ LISTEN=0.0.0.0:$PORT
 AUTH=admin:$PW
 # Abgestimmt auf 1 Gbit/s und mehrere Kerne:
 WORKERS=-fetch-workers 256 -probe-workers 128 -per-host 24 -probe-per-host 16 -local-workers 8
-# Stufe 4 – ähnliche Inhalte (Bilder, Videos, Texte, PDFs, Office, Archive). Leer lassen = aus.
-SIMILAR=-similar -analyze-workers 4 -sim-max 512
+# Stufe 4 – ähnliche Inhalte (Bilder, Videos, Audio, Texte, PDFs, Office, Archive). Leer lassen = aus.
+SIMILAR=-similar -analyze-workers 6 -media-workers 2 -sim-max 512
 # Weitere Optionen, z.B. Dateien behalten:  EXTRA=-store $DATA/store
+# Download-Rate begrenzen (z.B. auf geteilten Servern):  EXTRA=-max-rate 50
 EXTRA=
 CONF
   chmod 600 "$ENVF"
@@ -63,8 +64,14 @@ else
   echo "==> Bestehende Konfiguration $ENVF bleibt erhalten"
   if ! grep -q '^SIMILAR=' "$ENVF"; then
     echo "==> Ähnlichkeitsanalyse in $ENVF ergänzt (SIMILAR=…; leer setzen zum Abschalten)"
-    printf '%s\n' '# Stufe 4 – ähnliche Inhalte (Bilder, Videos, Texte, PDFs, Office, Archive). Leer lassen = aus.' \
-      'SIMILAR=-similar -analyze-workers 4 -sim-max 512' >> "$ENVF"
+    printf '%s\n' '# Stufe 4 – ähnliche Inhalte (Bilder, Videos, Audio, Texte, PDFs, Office, Archive). Leer lassen = aus.' \
+      'SIMILAR=-similar -analyze-workers 6 -media-workers 2 -sim-max 512' >> "$ENVF"
+  elif grep -qx 'SIMILAR=-similar -analyze-workers 4 -sim-max 512' "$ENVF"; then
+    echo "==> Ähnlichkeitsanalyse: Standardwerte aktualisiert (mehr Worker, eigener Video/Audio-Pool)"
+    sed -i 's|^SIMILAR=-similar -analyze-workers 4 -sim-max 512$|SIMILAR=-similar -analyze-workers 6 -media-workers 2 -sim-max 512|' "$ENVF"
+  fi
+  if ! grep -q '^# -max-rate' "$ENVF"; then
+    printf '%s\n' '# -max-rate 50 in EXTRA begrenzt die gesamte Download-Rate auf 50 MB/s (z.B. auf geteilten Servern)' >> "$ENVF"
   fi
 fi
 
@@ -88,6 +95,10 @@ TimeoutStopSec=30
 LimitNOFILE=1048576
 # Ressourcen: max. ~85 % der CPU-Kerne
 CPUQuota=$(( $(nproc) * 85 ))%
+# Niedrigere Priorität: andere Dienste auf dem Server haben bei CPU und Festplatte Vorrang
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
