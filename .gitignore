@@ -1,0 +1,8 @@
+# Laufzeitdaten und Build-Ergebnisse
+*.db
+*.db-*
+*.log
+web-dupplet
+web-dupplet-linux-*
+dist/
+.zugang

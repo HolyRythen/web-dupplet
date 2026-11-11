@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web-Dupplet</title>
+<style>
+:root{
+  --bg:#f6f7f9;--card:#fff;--fg:#14171c;--mute:#5d6673;--line:#e3e6eb;
+  --acc:#2f6fed;--ok:#1f9d63;--dup:#d9502b;--warn:#c98a00;--err:#b42318;--part:#7b61d1;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0f1115;--card:#171a20;--fg:#e8eaed;--mute:#9aa3ae;--line:#2a2f37;
+  --acc:#6d9bff;--ok:#3ccf8e;--dup:#ff7a52;--warn:#e7b43a;--err:#ff6b5e;--part:#a58bff;
+}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1200px;margin:0 auto;padding:20px 16px 60px}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:22px;margin:0;letter-spacing:-.01em}
+h1 span{color:var(--dup)}
+.pill{font-size:12px;padding:3px 10px;border-radius:99px;background:var(--line);color:var(--mute)}
+.pill.run{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.pill.pause{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+.sp{flex:1}
+button,.btn{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:7px 14px;border-radius:8px;cursor:pointer;text-decoration:none}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button:hover,.btn:hover{border-color:var(--acc)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.hero{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:12px}
+.hero .card{padding:20px}
+.lbl{font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.05em}
+.big{font-size:40px;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.1;margin:6px 0 4px}
+.sub{color:var(--mute);font-size:13px}
+.dupc .big{color:var(--dup)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:12px}
+.kpi .v{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:4px}
+.bar{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--line);margin:12px 0 10px}
+.bar div{height:100%;transition:width .6s}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;color:var(--mute)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.legend b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+@media(max-width:800px){.grid2{grid-template-columns:1fr}.big{font-size:32px}}
+h2{font-size:15px;margin:0 0 10px}
+textarea,input[type=text]{width:100%;font:13px var(--mono);background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
+textarea{height:96px;resize:vertical}
+.row{display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap}
+.msg{font-size:13px;color:var(--mute)}
+.pipe{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;text-align:center}
+.pipe div{background:var(--bg);border-radius:8px;padding:10px 4px}
+.pipe b{display:block;font-size:18px;font-variant-numeric:tabular-nums}
+.pipe span{font-size:12px;color:var(--mute)}
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-weight:600;color:var(--mute);font-size:12px;padding:8px;border-bottom:1px solid var(--line)}
+td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.files{font:12px var(--mono);word-break:break-all;color:var(--mute)}
+.files div{padding:1px 0}
+.hash{font:12px var(--mono);color:var(--mute)}
+a.more{color:var(--acc);cursor:pointer;font-size:12px}
+.empty{color:var(--mute);padding:18px 8px;text-align:center}
+details summary{cursor:pointer;font-weight:600}
+.errl{font:12px var(--mono);max-height:300px;overflow:auto;margin-top:8px}
+.errl div{padding:4px 0;border-bottom:1px solid var(--line);word-break:break-all}
+.errl span{color:var(--err)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Web-<span>Dupplet</span></h1>
+    <span id="state" class="pill">verbinde…</span>
+    <span id="mode" class="pill"></span>
+    <div class="sp"></div>
+    <a class="btn" href="api/export.csv">CSV exportieren</a>
+    <button id="pauseBtn">Pause</button>
+  </header>
+
+  <div class="hero">
+    <div class="card">
+      <div class="lbl">Dateien angeschaut</div>
+      <div class="big" id="checked">–</div>
+      <div class="sub" id="checkedSub">von – erfasst</div>
+    </div>
+    <div class="card dupc">
+      <div class="lbl">Übereinstimmungen</div>
+      <div class="big" id="dupFiles">–</div>
+      <div class="sub" id="dupSub">identische Dateien</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:12px">
+    <div class="lbl">Fortschritt</div>
+    <div class="bar" id="bar"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="kpis">
+    <div class="card kpi"><div class="lbl">Download-Rate</div><div class="v" id="rate">–</div></div>
+    <div class="card kpi"><div class="lbl">Dateien / Sek.</div><div class="v" id="frate">–</div></div>
+    <div class="card kpi"><div class="lbl">Geladen gesamt</div><div class="v" id="read">–</div></div>
+    <div class="card kpi"><div class="lbl">Erfasstes Volumen</div><div class="v" id="known">–</div></div>
+    <div class="card kpi"><div class="lbl">Nicht geladen (gespart)</div><div class="v" id="saved">–</div></div>
+    <div class="card kpi"><div class="lbl">Doppelt belegt</div><div class="v" id="wasted">–</div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Warteschlange</h2>
+      <div class="pipe">
+        <div><b id="qProbe">–</b><span>Größe prüfen</span></div>
+        <div><b id="qPart">–</b><span>Teil-Hash</span></div>
+        <div><b id="qFull">–</b><span>Voll-Hash</span></div>
+        <div><b id="qAct">–</b><span>gerade aktiv</span></div>
+      </div>
+      <p class="msg" style="margin:12px 0 0">Größe einmalig ⇒ sicher kein Duplikat, kein Download.
+        Gleiche Größe ⇒ nur Anfang+Ende laden. Gleicher Teil-Hash ⇒ komplett laden &amp; SHA-256 vergleichen.</p>
+    </div>
+    <div class="card">
+      <h2>Dateien hinzufügen</h2>
+      <textarea id="urls" placeholder="https://beispiel.de/datei1.iso&#10;https://beispiel.de/datei2.iso&#10;… eine URL pro Zeile"></textarea>
+      <div class="row"><button class="primary" id="addBtn">URLs hinzufügen</button><span class="msg" id="addMsg"></span></div>
+      <div class="row" style="margin-top:12px"><input type="text" id="crawlUrl" placeholder="https://seite.de/dokumente/  oder  rsync://mirror/modul/pfad/" style="flex:1;min-width:180px"><input type="text" id="crawlExt" value="*" style="width:150px" title="* = alle Dateitypen, oder z.B.: word, bilder, videos, audio, office, archive, pdf,docx,jpg"><button id="crawlBtn">Webseite durchsuchen</button></div>
+      <div class="row" style="margin-top:12px"><input type="text" id="path" placeholder="/mnt/daten  (lokalen Ordner mit vergleichen)" style="flex:1;min-width:180px"><button id="scanBtn">Ordner scannen</button></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:12px" id="crawlCard" hidden>
+    <h2>Durchsuchte Webseiten</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Webseite</th><th style="text-align:right">Seiten/Einträge</th><th style="text-align:right">noch offen</th><th style="text-align:right">Dateien gefunden</th><th>Status</th></tr></thead>
+      <tbody id="crawls"></tbody>
+    </table></div>
+  </div>
+
+  <div class="card" style="margin-bottom:12px">
+    <div class="row" style="margin:0 0 6px"><h2 style="margin:0">Duplikat-Gruppen</h2><span class="msg" id="gInfo"></span><div class="sp"></div>
+      <button id="prev">‹</button><button id="next">›</button></div>
+    <div class="tbl"><table>
+      <thead><tr><th>Dateien</th><th style="text-align:right">Anzahl</th><th style="text-align:right">Größe</th><th style="text-align:right">Verschwendet</th></tr></thead>
+      <tbody id="groups"><tr><td colspan="4" class="empty">Noch keine Übereinstimmungen gefunden.</td></tr></tbody>
+    </table></div>
+  </div>
+
+  <div class="card">
+    <details id="errBox"><summary>Fehler (<span id="errN">0</span>)</summary><div class="errl" id="errs"></div></details>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const nf = new Intl.NumberFormat('de-DE');
+const n = x => nf.format(x||0);
+function bytes(b){ b=b||0; const u=['B','KB','MB','GB','TB','PB','EB']; let i=0; while(b>=1000&&i<u.length-1){b/=1000;i++}
+  return (i?b.toLocaleString('de-DE',{maximumFractionDigits:b<10?2:1}):b)+' '+u[i]; }
+function esc(s){ return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function dur(s){ const h=Math.floor(s/3600),m=Math.floor(s%3600/60); return h?`${h} h ${m} min`:`${m} min`; }
+
+let paused=false, offset=0, lastGroups=-1;
+const LIMIT=25;
+
+async function stats(){
+  try{
+    const s = await (await fetch('api/stats')).json();
+    paused = s.paused;
+    const st=$('state');
+    st.textContent = s.paused ? 'pausiert' : (s.active>0||s.scanning? 'läuft' : (s.pending>0?'wartet':'fertig'));
+    st.className = 'pill ' + (s.paused?'pause':'run');
+    $('mode').textContent = 'Modus: '+s.mode+' · '+dur(s.uptime);
+    $('pauseBtn').textContent = s.paused ? 'Fortsetzen' : 'Pause';
+    $('checked').textContent = n(s.checked);
+    const pct = s.total ? (100*s.checked/s.total).toLocaleString('de-DE',{maximumFractionDigits:1}) : '0';
+    $('checkedSub').textContent = `von ${n(s.total)} erfasst · ${pct} %` + (s.scanning?' · Ordner-Scan läuft…':'');
+    $('dupFiles').textContent = n(s.dupFiles);
+    $('dupSub').textContent = `in ${n(s.dupGroups)} Gruppen · ${n(s.redundant)} überflüssige Kopien`;
+    $('rate').textContent = bytes(s.rate)+'/s';
+    $('frate').textContent = n(Math.round(s.filesRate));
+    $('read').textContent = bytes(s.bytesRead);
+    $('known').textContent = bytes(s.knownBytes);
+    $('saved').textContent = bytes(s.savedBytes);
+    $('wasted').textContent = bytes(s.wasted);
+    $('qProbe').textContent = n(s.needProbe);
+    $('qPart').textContent = n(s.needPartial);
+    $('qFull').textContent = n(s.needFull);
+    $('qAct').textContent = n(s.active);
+    $('errN').textContent = n(s.errors);
+    const segs = [
+      ['Voll gehasht', s.hashed, 'var(--ok)'],
+      ['Eindeutig (Größe)', s.uniqueSize, 'var(--acc)'],
+      ['Eindeutig (Teil-Hash)', s.uniquePartial, 'var(--part)'],
+      ['Fehler', s.errors, 'var(--err)'],
+      ['Ausstehend', s.pending, 'var(--line)'],
+    ];
+    const tot = Math.max(1, s.total);
+    $('bar').innerHTML = segs.map(([l,v,c])=>`<div title="${l}: ${n(v)}" style="width:${100*v/tot}%;background:${c}"></div>`).join('');
+    $('legend').innerHTML = segs.map(([l,v,c])=>`<span><i style="background:${c}"></i>${l} <b>${n(v)}</b></span>`).join('');
+    if (s.dupGroups !== lastGroups){ lastGroups = s.dupGroups; groups(); }
+    if ($('errBox').open) errors();
+  }catch(e){ $('state').textContent='keine Verbindung'; $('state').className='pill'; }
+}
+
+async function groups(){
+  const d = await (await fetch(`api/groups?limit=${LIMIT}&offset=${offset}`)).json();
+  const gs = d.groups||[];
+  $('gInfo').textContent = d.total ? `${n(offset+1)}–${n(offset+gs.length)} von ${n(d.total)} · sortiert nach verschwendetem Platz` : '';
+  $('prev').disabled = offset===0; $('next').disabled = offset+LIMIT >= d.total;
+  if(!gs.length){ $('groups').innerHTML='<tr><td colspan="4" class="empty">Noch keine Übereinstimmungen gefunden.</td></tr>'; return; }
+  $('groups').innerHTML = gs.map(g=>`<tr>
+    <td><div class="files" id="f${g.hash}">${g.files.map(f=>`<div>${esc(f)}</div>`).join('')}</div>
+      ${g.count>g.files.length?`<a class="more" data-h="${g.hash}">+ ${n(g.count-g.files.length)} weitere anzeigen</a>`:''}
+      <div class="hash">sha256 ${g.hash.slice(0,16)}…</div></td>
+    <td class="n">${n(g.count)}</td><td class="n">${bytes(g.size)}</td><td class="n">${bytes((g.count-1)*g.size)}</td></tr>`).join('');
+}
+$('groups').addEventListener('click', async e=>{
+  const h = e.target.dataset && e.target.dataset.h; if(!h) return;
+  const d = await (await fetch('api/group?h='+h)).json();
+  $('f'+h).innerHTML = d.files.map(f=>`<div>${esc(f)}</div>`).join(''); e.target.remove();
+});
+$('prev').onclick = ()=>{ offset=Math.max(0,offset-LIMIT); groups(); };
+$('next').onclick = ()=>{ offset+=LIMIT; groups(); };
+
+async function errors(){
+  const es = await (await fetch('api/errors')).json();
+  $('errs').innerHTML = es.length ? es.map(x=>`<div>${esc(x.loc)}<br><span>${esc(x.err)}</span></div>`).join('') : '<div class="empty">Keine Fehler.</div>';
+}
+$('errBox').addEventListener('toggle', ()=>{ if($('errBox').open) errors(); });
+
+$('pauseBtn').onclick = async ()=>{ await fetch('api/pause?on='+(paused?0:1),{method:'POST'}); stats(); };
+$('addBtn').onclick = async ()=>{
+  const t=$('urls').value; if(!t.trim()) return;
+  const r = await fetch('api/add',{method:'POST',body:t});
+  if(r.ok){ const d=await r.json(); $('addMsg').textContent=`${n(d.added)} URLs übernommen`; $('urls').value=''; }
+  else $('addMsg').textContent = await r.text();
+};
+$('crawlBtn').onclick = async ()=>{
+  const u=$('crawlUrl').value.trim(); if(!u) return;
+  const r = await fetch('api/crawl',{method:'POST',body:JSON.stringify({url:u,exts:$('crawlExt').value})});
+  $('addMsg').textContent = r.ok ? 'Durchsuchen gestartet' : await r.text();
+  if(r.ok){ $('crawlUrl').value=''; crawls(); }
+};
+async function crawls(){
+  const cs = await (await fetch('api/crawls')).json();
+  $('crawlCard').hidden = !cs.length;
+  $('crawls').innerHTML = cs.map(c=>`<tr><td class="files">${esc(c.url)} <span class="hash">(${esc(c.exts)})</span>${c.base?`<div class="hash">→ ${esc(c.base)}</div>`:''}${c.err?`<div style="color:var(--err)">${esc(c.err)}</div>`:''}</td>
+    <td class="n">${n(c.pages)}</td><td class="n">${n(c.queued)}</td><td class="n">${n(c.found)}</td>
+    <td>${c.running?`<span class="pill run">${c.index?'Dateiliste':'läuft'}</span> <a class="more" data-stop="${esc(c.url)}">stoppen</a>`:'<span class="pill">fertig</span>'}</td></tr>`).join('');
+}
+$('crawls').addEventListener('click', async e=>{
+  const u = e.target.dataset && e.target.dataset.stop; if(!u) return;
+  await fetch('api/crawl/stop',{method:'POST',body:JSON.stringify({url:u})}); crawls();
+});
+setInterval(crawls, 2000); crawls();
+$('scanBtn').onclick = async ()=>{
+  const p=$('path').value.trim(); if(!p) return;
+  const r = await fetch('api/scan',{method:'POST',body:JSON.stringify({path:p})});
+  $('addMsg').textContent = r.ok ? 'Ordner-Scan gestartet' : await r.text();
+};
+
+stats(); setInterval(stats, 1000);
+</script>
+</body>
+</html>
