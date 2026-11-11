@@ -100,11 +100,17 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now web-dupplet
 
-if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-  echo "==> Firewall (ufw): Port $PORT freigeben"; ufw allow "$PORT"/tcp >/dev/null
-elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
-  echo "==> Firewall (firewalld): Port $PORT freigeben"; firewall-cmd -q --permanent --add-port="$PORT"/tcp; firewall-cmd -q --reload
-fi
+LISTEN_ADDR=$(grep '^LISTEN=' "$ENVF" | cut -d= -f2)
+case "$LISTEN_ADDR" in
+  127.*|localhost:*|\[::1\]:*)
+    echo "==> Firewall: nichts freigegeben (Web-UI lauscht nur lokal auf $LISTEN_ADDR)" ;;
+  *)
+    if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+      echo "==> Firewall (ufw): Port $PORT freigeben"; ufw allow "$PORT"/tcp >/dev/null
+    elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+      echo "==> Firewall (firewalld): Port $PORT freigeben"; firewall-cmd -q --permanent --add-port="$PORT"/tcp; firewall-cmd -q --reload
+    fi ;;
+esac
 
 sleep 2
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -116,7 +122,10 @@ if systemctl is-active --quiet web-dupplet; then
 else
   echo "❌ Start fehlgeschlagen – Log: journalctl -u web-dupplet -n 50"; exit 1
 fi
-echo "   Web-UI:    http://$IP:$LISTEN_PORT"
+case "$LISTEN_ADDR" in
+  127.*|localhost:*) echo "   Web-UI:    http://$LISTEN_ADDR  (nur lokal – z.B. per SSH-Tunnel: ssh -L $LISTEN_PORT:$LISTEN_ADDR <server>)" ;;
+  *)                 echo "   Web-UI:    http://$IP:$LISTEN_PORT" ;;
+esac
 echo "   Benutzer:  ${CRED%%:*}"
 echo "   Passwort:  ${CRED#*:}"
 echo

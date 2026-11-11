@@ -62,6 +62,7 @@ const (
 	minExact    = 4096     // kleinere Archiv-Einträge werden nicht exakt abgeglichen (README, LICENSE …)
 	memBufMax   = 64 << 20 // Archiv-Einträge bis zu dieser Größe werden auch inhaltlich analysiert
 	maxPairsNew = 25       // höchstens so viele Paare pro neuem Fingerabdruck
+	genericHits = 100      // mehr Treffer = zu allgemeiner Inhalt (leere Seite, Standardmuster) → keine Paare
 	pdfMaxImgs  = 60
 	minImgSide  = 48 // kleinere Bilder (Symbole, Linien) aus PDFs/Office ignorieren
 )
@@ -699,8 +700,8 @@ func (a *Analyzer) pdf(ctx context.Context, file int64, sub, path string, size i
 			continue
 		}
 		img, err := decodeImage(b)
-		if err != nil || img.Bounds().Dx() < minImgSide || img.Bounds().Dy() < minImgSide {
-			continue
+		if err != nil || img.Bounds().Dx() < minImgSide || img.Bounds().Dy() < minImgSide || isBitonal(img) {
+			continue // zu klein oder eingescannte Schwarz-Weiß-Seite
 		}
 		if f, ok := imageFingerprint(img); ok {
 			out = append(out, fpItem{File: file, Sub: joinSub(sub, fmt.Sprintf("PDF-Bild %d", i+1)), Kind: fpImage,
@@ -941,6 +942,9 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 				cands = append(cands, pairCand{id, 1, pkArchive})
 			}
 			rows.Close()
+		}
+		if len(cands) > genericHits && (n.it.Kind == fpImage || n.it.Kind == fpText) {
+			cands = nil // zu allgemein: Paare wären nur Rauschen
 		}
 		sort.Slice(cands, func(i, k int) bool { return cands[i].score > cands[k].score })
 		if len(cands) > maxPairsNew {

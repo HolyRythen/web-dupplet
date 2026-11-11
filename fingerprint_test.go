@@ -178,3 +178,29 @@ func TestLatin1WirdUTF8(t *testing.T) {
 		t.Fatalf("got %q", s)
 	}
 }
+
+func TestSchwarzWeissScanWirdErkannt(t *testing.T) {
+	seite := image.NewGray(image.Rect(0, 0, 600, 800))
+	rnd := rand.New(rand.NewSource(3))
+	for i := range seite.Pix {
+		seite.Pix[i] = 255
+	}
+	for z := 60; z < 740; z += 18 { // „Textzeilen“
+		for x := 50; x < 550; x++ {
+			if rnd.Intn(3) > 0 {
+				for y := z; y < z+9; y++ {
+					seite.Pix[y*600+x] = 0
+				}
+			}
+		}
+	}
+	if !isBitonal(seite) {
+		t.Error("eingescannte Textseite nicht als Schwarz-Weiß erkannt")
+	}
+	if isBitonal(testBild(1, 600, 400)) {
+		t.Error("Farbbild fälschlich als Schwarz-Weiß erkannt")
+	}
+	if !isBitonal(alsJPEG(t, seite, 60)) {
+		t.Error("JPEG-komprimierter Textscan nicht als Schwarz-Weiß erkannt")
+	}
+}

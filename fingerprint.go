@@ -245,6 +245,29 @@ func thumbnail(img image.Image, maxSide int) []byte {
 
 func hamming(a, b uint64) int { return bits.OnesCount64(a ^ b) }
 
+// isBitonal erkennt Schwarz-Weiß-Bilder (typisch: eingescannte Textseiten in PDFs).
+// Solche Seiten sehen sich verkleinert alle ähnlich und würden massenhaft falsche Treffer erzeugen.
+func isBitonal(img image.Image) bool {
+	switch m := img.(type) {
+	case *image.Paletted:
+		return len(m.Palette) <= 2
+	}
+	b := img.Bounds()
+	step := max(1, int(math.Sqrt(float64(b.Dx()*b.Dy())/20000))) // ≈ 20.000 Stichproben
+	var n, extreme int
+	for y := b.Min.Y; y < b.Max.Y; y += step {
+		for x := b.Min.X; x < b.Max.X; x += step {
+			r, g, bl, _ := img.At(x, y).RGBA()
+			l := (299*r + 587*g + 114*bl) / 1000 >> 8
+			n++
+			if l < 40 || l > 215 {
+				extreme++
+			}
+		}
+	}
+	return n > 0 && float64(extreme) >= 0.97*float64(n)
+}
+
 // ---------- Text ----------
 
 // normWords: Kleinbuchstaben, nur Buchstaben/Ziffern, Umlaute bleiben erhalten.
