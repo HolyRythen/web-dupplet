@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -134,13 +135,15 @@ func TestTextVariantenSindAehnlich(t *testing.T) {
 	}
 	for name, v := range varianten {
 		b, _ := textFingerprint(v)
-		if d := hamming(a.Sim, b.Sim); d > txtMax {
-			t.Errorf("%s: Abstand %d > %d", name, d, txtMax)
+		if d, j := hamming(a.Sim, b.Sim), jaccard(a.Min, b.Min); !textSimilar(d, j) {
+			t.Errorf("%s: nicht ähnlich (SimHash %d Bit, Jaccard %.2f)", name, d, j)
+		} else {
+			t.Logf("%s: SimHash %d Bit, Jaccard %.2f", name, d, j)
 		}
 	}
 	anders, _ := textFingerprint(strings.Repeat("Ein völlig anderer Text über Kochrezepte, Nudeln, Tomaten und Basilikum im Sommer. ", 6))
-	if d := hamming(a.Sim, anders.Sim); d <= txtMax {
-		t.Errorf("anderer Text gilt als ähnlich (Abstand %d)", d)
+	if d, j := hamming(a.Sim, anders.Sim), jaccard(a.Min, anders.Min); textSimilar(d, j) {
+		t.Errorf("anderer Text gilt als ähnlich (SimHash %d, Jaccard %.2f)", d, j)
 	}
 }
 
@@ -202,5 +205,49 @@ func TestSchwarzWeissScanWirdErkannt(t *testing.T) {
 	}
 	if !isBitonal(alsJPEG(t, seite, 60)) {
 		t.Error("JPEG-komprimierter Textscan nicht als Schwarz-Weiß erkannt")
+	}
+}
+
+// Nachgestellt aus echten Daten (bitsavers): lange OCR-Texte verschiedener Handbücher mit gleichem Fachvokabular,
+// Zahlenkolonnen und Zeichensalat dürfen NICHT als ähnlich gelten – Varianten desselben Textes schon.
+func langerFachtext(seed int64, n int) string {
+	rnd := rand.New(rand.NewSource(seed))
+	vokabular := strings.Fields(`system unit processor storage channel data address register control signal circuit
+		input output disk printer card reader punch diagnostic routine error check parity bit byte word field
+		maintenance procedure step test switch panel indicator lamp console operator program instruction
+		the of and to in for is on with by this that be are from as at or an it`)
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		switch r := rnd.Intn(10); {
+		case r < 7:
+			b.WriteString(vokabular[rnd.Intn(len(vokabular))])
+		case r < 9:
+			fmt.Fprintf(&b, "%d", rnd.Intn(100)) // Tabellen, Seitenzahlen
+		default:
+			b.WriteString(string(rune('a' + rnd.Intn(26)))) // OCR-Zeichensalat
+		}
+		b.WriteByte(' ')
+	}
+	return b.String()
+}
+
+func TestLangeOCRTexteNichtAehnlich(t *testing.T) {
+	a, _ := textFingerprint(langerFachtext(1, 120000))
+	for seed := int64(2); seed <= 6; seed++ {
+		b, _ := textFingerprint(langerFachtext(seed, 120000))
+		t.Logf("Handbuch %d: SimHash %d Bit, Jaccard %.2f", seed, hamming(a.Sim, b.Sim), jaccard(a.Min, b.Min))
+		if j := jaccard(a.Min, b.Min); textSimilar(hamming(a.Sim, b.Sim), j) {
+			t.Errorf("verschiedene Handbücher %d gelten als ähnlich (SimHash %d Bit, Jaccard %.2f)", seed, hamming(a.Sim, b.Sim), j)
+		}
+	}
+	// dieselbe Ausgabe mit 3 % geänderten Wörtern (andere Auflage/OCR) bleibt ähnlich
+	w := strings.Fields(langerFachtext(1, 120000))
+	rnd := rand.New(rand.NewSource(9))
+	for i := 0; i < len(w)*3/100; i++ {
+		w[rnd.Intn(len(w))] = "geändert"
+	}
+	v, _ := textFingerprint(strings.Join(w, " "))
+	if j := jaccard(a.Min, v.Min); !textSimilar(hamming(a.Sim, v.Sim), j) {
+		t.Errorf("Variante mit 3 %% Änderungen nicht erkannt (SimHash %d Bit, Jaccard %.2f)", hamming(a.Sim, v.Sim), j)
 	}
 }

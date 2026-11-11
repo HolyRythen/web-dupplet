@@ -11,6 +11,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"hash/fnv"
 	"image"
 	"image/color"
@@ -29,7 +30,7 @@ const hashSide = 32 // Kantenlänge des Graustufenbildes für den pHash
 const (
 	imgMaxP   = 8  // Bilder: pHash
 	imgMaxD   = 14 // Bilder: dHash als zweite Bestätigung (weniger Fehltreffer)
-	txtMax    = 7  // Texte: SimHash (Zufallstexte liegen bei ≈32 ± 4 Bit; ≤7 findet der Index garantiert)
+	txtMax    = 14 // Texte: SimHash-Vorfilter (großzügig) – entschieden wird über MinHash (txtMinJac)
 	vidFrameD = 10 // Videos: je Einzelbild
 )
 
@@ -281,19 +282,69 @@ func normWords(s string) []string {
 const minTextWords = 30
 
 // TextFP ist der Fingerabdruck eines Textes.
+//
+// Sim: SimHash (64 Bit) – schneller Vorfilter über den Such-Index.
+// Min: MinHash (64 Werte) – schätzt, welcher Anteil der Wort-Dreiergruppen beiden Texten gemeinsam ist (Jaccard).
+// Erst beides zusammen ist zuverlässig: Bei sehr langen Texten (z.B. OCR-Handbücher mit 100.000+ Wörtern und
+// gleichem Fachvokabular) gleichen sich SimHash-Werte an; MinHash unterscheidet sie sicher.
 type TextFP struct {
-	Sim   uint64 // SimHash
+	Sim   uint64
+	Min   []uint32
 	Words int
 	Snip  string // Textanfang für die Vorschau
 }
 
+const (
+	minHashN  = 64
+	txtMinJac = 0.5 // mindestens die Hälfte der Wort-Dreiergruppen gemeinsam
+)
+
+var minHashSeeds = func() (s [minHashN]uint64) {
+	x := uint64(0x9e3779b97f4a7c15)
+	for i := range s {
+		x = splitmix(x)
+		s[i] = x
+	}
+	return
+}()
+
+func splitmix(x uint64) uint64 {
+	x += 0x9e3779b97f4a7c15
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
+// shingleWord: Zahlen und Einzelzeichen (Seitenzahlen, Tabellen, OCR-Zeichensalat) tragen nichts zum Inhalt bei.
+func shingleWord(w string) bool {
+	if utf8.RuneCountInString(w) < 2 {
+		return false
+	}
+	for _, r := range w {
+		if !unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func textFingerprint(s string) (fp TextFP, ok bool) {
-	w := normWords(s)
-	fp.Words = len(w)
+	all := normWords(s)
+	fp.Words = len(all)
+	if len(all) < minTextWords {
+		return fp, false
+	}
+	w := all[:0:0]
+	for _, x := range all {
+		if shingleWord(x) {
+			w = append(w, x)
+		}
+	}
 	if len(w) < minTextWords {
 		return fp, false
 	}
-	var v [64]int
+	// jede Dreiergruppe nur einmal (Menge) – häufige Wendungen und Tabellenzeilen dominieren sonst
+	set := make(map[uint64]struct{}, len(w))
 	h := fnv.New64a()
 	for i := 0; i+3 <= len(w); i++ {
 		h.Reset()
@@ -302,12 +353,24 @@ func textFingerprint(s string) (fp TextFP, ok bool) {
 		h.Write([]byte(w[i+1]))
 		h.Write([]byte{0})
 		h.Write([]byte(w[i+2]))
-		x := h.Sum64()
+		set[h.Sum64()] = struct{}{}
+	}
+	var v [64]int
+	mins := make([]uint64, minHashN)
+	for i := range mins {
+		mins[i] = ^uint64(0)
+	}
+	for x := range set {
 		for b := 0; b < 64; b++ {
 			if x&(1<<uint(b)) != 0 {
 				v[b]++
 			} else {
 				v[b]--
+			}
+		}
+		for i, seed := range minHashSeeds {
+			if m := splitmix(x ^ seed); m < mins[i] {
+				mins[i] = m
 			}
 		}
 	}
@@ -316,8 +379,48 @@ func textFingerprint(s string) (fp TextFP, ok bool) {
 			fp.Sim |= 1 << uint(b)
 		}
 	}
+	fp.Min = make([]uint32, minHashN)
+	for i, m := range mins {
+		fp.Min[i] = uint32(m >> 32)
+	}
 	fp.Snip = snippet(s, 280)
 	return fp, true
+}
+
+// jaccard schätzt den Anteil gemeinsamer Wort-Dreiergruppen (0–1). Ohne MinHash (alte Daten): 0.
+func jaccard(a, b []uint32) float64 {
+	if len(a) != minHashN || len(b) != minHashN {
+		return 0
+	}
+	n := 0
+	for i := range a {
+		if a[i] == b[i] {
+			n++
+		}
+	}
+	return float64(n) / minHashN
+}
+
+// textSimilar: SimHash-Vorfilter UND MinHash-Bestätigung.
+func textSimilar(simDist int, jac float64) bool { return simDist <= txtMax && jac >= txtMinJac }
+
+func minBlob(m []uint32) []byte {
+	b := make([]byte, 4*len(m))
+	for i, x := range m {
+		binary.LittleEndian.PutUint32(b[4*i:], x)
+	}
+	return b
+}
+
+func blobMin(b []byte) []uint32 {
+	if len(b) != 4*minHashN {
+		return nil
+	}
+	m := make([]uint32, minHashN)
+	for i := range m {
+		m[i] = binary.LittleEndian.Uint32(b[4*i:])
+	}
+	return m
 }
 
 func snippet(s string, n int) string {

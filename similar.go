@@ -213,6 +213,7 @@ type Analyzer struct {
 	vid, aud    mih
 	vidMeta     map[int64]seqInfo
 	audMeta     map[int64]seqInfo
+	txtMin      map[int64][]uint32    // MinHash je Text-Fingerabdruck
 	cnt         [10]atomic.Int64      // Zähler je analysis.state
 	pairs       [pkKinds]atomic.Int64 // Zähler je pairs.kind
 	arcRels     atomic.Int64
@@ -248,6 +249,7 @@ func newAnalyzer(e *Engine) (*Analyzer, error) {
 		frames:       max(3, e.cfg.VideoFrames),
 		vidMeta:      map[int64]seqInfo{},
 		audMeta:      map[int64]seqInfo{},
+		txtMin:       map[int64][]uint32{},
 		retryNow:     make(chan struct{}, 1),
 	}
 	a.jobs = make(chan anJob, a.workers*4)
@@ -260,6 +262,9 @@ func newAnalyzer(e *Engine) (*Analyzer, error) {
 	}
 	if err := a.migrateArchives(); err != nil {
 		return nil, fmt.Errorf("Migration Archive: %w", err)
+	}
+	if err := a.migrateTextMinHash(); err != nil {
+		return nil, fmt.Errorf("Migration Texte: %w", err)
 	}
 	return a, a.load()
 }
@@ -366,6 +371,47 @@ func (a *Analyzer) migrateArchives() error {
 	return nil
 }
 
+// migrateTextMinHash (einmalig): Text-Fingerabdrücke ohne MinHash (ältere Version) lassen sich nicht bestätigen.
+// Die betroffenen Dateien werden komplett neu analysiert; ihre Paare, Vorschauen und Archiv-Daten entfallen bis dahin.
+func (a *Analyzer) migrateTextMinHash() error {
+	var v string
+	if a.db.QueryRow(`SELECT v FROM meta WHERE k='sim_minhash'`).Scan(&v) == nil {
+		return nil
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	steps := []string{
+		`CREATE TEMP TABLE redo AS SELECT DISTINCT file_id FROM fps WHERE kind=2 AND extra IS NULL`,
+		`CREATE TEMP TABLE redofp AS SELECT id FROM fps WHERE file_id IN (SELECT file_id FROM redo)`,
+		`DELETE FROM pairs WHERE a IN (SELECT id FROM redofp) OR b IN (SELECT id FROM redofp)`,
+		`DELETE FROM thumbs WHERE fp IN (SELECT id FROM redofp)`,
+		`DELETE FROM fps WHERE id IN (SELECT id FROM redofp)`,
+		`DELETE FROM arcrel WHERE a IN (SELECT file_id FROM redo) OR b IN (SELECT file_id FROM redo)`,
+		`DELETE FROM arcinfo WHERE file_id IN (SELECT file_id FROM redo)`,
+		`DELETE FROM analysis WHERE file_id IN (SELECT file_id FROM redo)`,
+	}
+	for _, q := range steps {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("%s: %w", q[:40], err)
+		}
+	}
+	var n int64
+	tx.QueryRow(`SELECT count(*) FROM redo`).Scan(&n)
+	tx.Exec(`DROP TABLE redo`)
+	tx.Exec(`DROP TABLE redofp`)
+	tx.Exec(`INSERT OR REPLACE INTO meta(k, v) VALUES('sim_minhash', '1')`)
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if n > 0 {
+		log.Printf("Ähnlichkeit: Textvergleich verbessert (MinHash) – %d Dateien werden neu analysiert", n)
+	}
+	return nil
+}
+
 // load baut die Such-Indizes und Zähler aus der Datenbank auf (nach Neustart).
 func (a *Analyzer) load() error {
 	t0 := time.Now()
@@ -436,6 +482,9 @@ func (a *Analyzer) index(id int64, it fpItem) {
 		a.img.add(mihEntry{fp: id, file: it.File, h: it.H1, aux: it.H2, cs: it.CS, ex: it.Ex})
 	case fpText:
 		a.txt.add(mihEntry{fp: id, file: it.File, h: it.H1, cs: it.CS, ex: it.Ex})
+		if m := blobMin(it.Extra); m != nil {
+			a.txtMin[id] = m
+		}
 	case fpVideo, fpAudio:
 		segs := blobFrames(it.Extra)
 		m, meta := &a.vid, a.vidMeta
@@ -973,7 +1022,7 @@ func (a *Analyzer) content(ctx context.Context, file int64, sub, ext string, mt 
 		return []fpItem{{File: file, Sub: sub, Kind: fpImage, H1: f.P, H2: f.D, Size: int64(len(b)), W: f.W, H: f.H, Thumb: f.Thumb, CS: cs, Ex: exact}}, nil
 	case mtText:
 		if f, ok := textFingerprint(plainText(ext, b)); ok {
-			return []fpItem{{File: file, Sub: sub, Kind: fpText, H1: f.Sim, Size: int64(len(b)), Words: f.Words, Snip: f.Snip, CS: cs, Ex: exact}}, nil
+			return []fpItem{{File: file, Sub: sub, Kind: fpText, H1: f.Sim, Size: int64(len(b)), Words: f.Words, Snip: f.Snip, Extra: minBlob(f.Min), CS: cs, Ex: exact}}, nil
 		}
 		return nil, nil
 	case mtOffice:
@@ -982,7 +1031,7 @@ func (a *Analyzer) content(ctx context.Context, file int64, sub, ext string, mt 
 		s, err := officeText(ra, int64(len(b)))
 		if err == nil {
 			if f, ok := textFingerprint(s); ok {
-				out = append(out, fpItem{File: file, Sub: sub, Kind: fpText, H1: f.Sim, Size: int64(len(b)), Words: f.Words, Snip: f.Snip, CS: cs, Ex: exact})
+				out = append(out, fpItem{File: file, Sub: sub, Kind: fpText, H1: f.Sim, Size: int64(len(b)), Words: f.Words, Snip: f.Snip, Extra: minBlob(f.Min), CS: cs, Ex: exact})
 			}
 		}
 		// eingebettete Bilder (word/media, ppt/media, Pictures/)
@@ -1026,7 +1075,7 @@ func (a *Analyzer) pdf(ctx context.Context, file int64, sub, path string, size i
 	var errs []string
 	if s, err := a.t.pdfText(ctx, path); err == nil {
 		if f, ok := textFingerprint(s); ok {
-			out = append(out, fpItem{File: file, Sub: sub, Kind: fpText, H1: f.Sim, Size: size, Words: f.Words, Snip: f.Snip})
+			out = append(out, fpItem{File: file, Sub: sub, Kind: fpText, H1: f.Sim, Size: size, Words: f.Words, Snip: f.Snip, Extra: minBlob(f.Min)})
 		}
 	} else {
 		errs = append(errs, err.Error())
@@ -1250,11 +1299,19 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 				}
 			})
 		case fpText:
-			a.txt.near(n.it.H1, txtMax, func(x mihEntry, d int) {
-				if x.file != n.it.File && !sameBytes(x, n.it) {
-					cands = append(cands, pairCand{x.fp, 1 - float64(d)/64, pkText})
+			// SimHash ist nur der Vorfilter (alle Texte durchgehen: ein Popcount je Eintrag, auch bei
+			// 100.000 Texten unter 1 ms) – bestätigt wird über gemeinsame Wort-Dreiergruppen (MinHash).
+			mine := blobMin(n.it.Extra)
+			for _, x := range a.txt.e {
+				if x.file == n.it.File || sameBytes(x, n.it) {
+					continue
 				}
-			})
+				if d := hamming(x.h, n.it.H1); d <= txtMax {
+					if j := jaccard(mine, a.txtMin[x.fp]); textSimilar(d, j) {
+						cands = append(cands, pairCand{x.fp, j, pkText})
+					}
+				}
+			}
 		case fpVideo, fpAudio:
 			m, meta, thr, pk := &a.vid, a.vidMeta, vidFrameD, pkVideo
 			if n.it.Kind == fpAudio {
