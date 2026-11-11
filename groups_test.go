@@ -106,7 +106,9 @@ func TestGruppenBehaltenUndAufraeumen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer e.an.db.Close()
+	e.an.grp.mu.Lock()
 	e.an.grp.g = g
+	e.an.grp.mu.Unlock()
 	var mid GNode
 	for _, n := range gr.Nodes {
 		if strings.HasSuffix(n.Loc, "mittel.jpg") {
