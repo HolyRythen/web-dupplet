@@ -334,15 +334,21 @@ func (t tools) pdfText(ctx context.Context, file string) (string, error) {
 	if len(out) > maxText {
 		out = out[:maxText]
 	}
-	return string(out), err
+	return dehyphen(string(out)), err
 }
+
+var reHyphen = regexp.MustCompile(`(\p{L})[-\x{00AD}]\r?\n[ \t]*(\p{Ll})`)
+
+// dehyphen fügt am Zeilenende getrennte Wörter wieder zusammen („Fingerab-⏎drücke“ → „Fingerabdrücke“).
+func dehyphen(s string) string { return reHyphen.ReplaceAllString(s, "$1$2") }
 
 // pdfImages zieht eingebettete Bilder heraus (JPEG bleibt JPEG, alles andere wird PNG).
 func (t tools) pdfImages(ctx context.Context, file, dir string, maxImgs int) ([]string, error) {
 	if t.pdfimages == "" {
 		return nil, errors.New("pdfimages fehlt (Paket poppler-utils)")
 	}
-	if _, err := runTool(ctx, 3*time.Minute, t.pdfimages, "-q", "-j", "-png", "-l", "500", file, filepath.Join(dir, "img")); err != nil {
+	// -l begrenzt die Seiten: bei eingescannten PDFs ist jede Seite ein Bild in voller Auflösung
+	if _, err := runTool(ctx, 3*time.Minute, t.pdfimages, "-q", "-j", "-png", "-l", strconv.Itoa(maxImgs), file, filepath.Join(dir, "img")); err != nil {
 		return nil, err
 	}
 	ents, _ := os.ReadDir(dir)

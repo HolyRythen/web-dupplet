@@ -198,3 +198,10 @@ func TestVideoFingerprintMitFFmpeg(t *testing.T) {
 		t.Errorf("anderes Video gilt fälschlich als ähnlich (Score %.2f)", s)
 	}
 }
+
+func TestDehyphen(t *testing.T) {
+	got := dehyphen("Die Fingerab-\ndrücke bleiben gleich. Nord-\nSüd bleibt getrennt.")
+	if got != "Die Fingerabdrücke bleiben gleich. Nord-\nSüd bleibt getrennt." {
+		t.Fatalf("%q", got)
+	}
+}
