@@ -205,3 +205,52 @@ func TestDehyphen(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+// Echter Test mit ffmpeg: dasselbe Musikstück als MP3, OGG und Opus in verschiedenen Bitraten ist ähnlich,
+// ein anderes Stück nicht.
+func TestAudioFingerprintMitFFmpeg(t *testing.T) {
+	tl := findTools()
+	if tl.ffmpeg == "" || tl.ffprobe == "" {
+		t.Skip("ffmpeg nicht installiert")
+	}
+	dir := t.TempDir()
+	// „Musik“: Akkordfolge mit wechselnden Tönen + leises Rauschen, 60 s
+	stueck := "aevalsrc=exprs='0.3*sin(2*PI*(220+55*mod(floor(t*2),7))*t)+0.2*sin(2*PI*(330+40*mod(floor(t*3),5))*t)+0.15*sin(2*PI*(523+30*mod(floor(t),4))*t)+0.02*(random(0)-0.5)':s=44100:d=60"
+	anderes := "aevalsrc=exprs='0.3*sin(2*PI*(392+70*mod(floor(t*1.5),6))*t)+0.25*sin(2*PI*(147+20*mod(floor(t*4),3))*t)+0.02*(random(0)-0.5)':s=44100:d=60"
+	mk := func(name, src string, args ...string) string {
+		p := filepath.Join(dir, name)
+		a := append([]string{"-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i", src}, args...)
+		if out, err := exec.Command(tl.ffmpeg, append(a, p)...).CombinedOutput(); err != nil {
+			t.Fatalf("ffmpeg %s: %v %s", name, err, out)
+		}
+		return p
+	}
+	mp3 := mk("a.mp3", stueck, "-c:a", "libmp3lame", "-b:a", "192k")
+	ogg := mk("a.ogg", stueck, "-c:a", "libvorbis", "-q:a", "1")
+	opus := mk("a.opus", stueck, "-c:a", "libopus", "-b:a", "32k")
+	fremd := mk("b.mp3", anderes, "-c:a", "libmp3lame", "-b:a", "128k")
+	ctx := context.Background()
+	fp := func(p string) AudioFP {
+		f, err := tl.audioFingerprint(ctx, p, "test", 8)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		return f
+	}
+	a, b, c, x := fp(mp3), fp(ogg), fp(opus), fp(fremd)
+	for name, o := range map[string]AudioFP{"OGG": b, "Opus": c, "fremd": x} {
+		var d []int
+		for i := range a.Segs {
+			d = append(d, hamming(a.Segs[i], o.Segs[i]))
+		}
+		t.Logf("MP3 ↔ %-5s Bit-Abstände je Ausschnitt: %v", name, d)
+	}
+	for name, o := range map[string]AudioFP{"OGG q1": b, "Opus 32k": c} {
+		if s, ok := seqScore(a.Segs, o.Segs, a.Dur, o.Dur, audFrameD); !ok {
+			t.Errorf("MP3 192k und %s sollten ähnlich sein (Score %.2f)", name, s)
+		}
+	}
+	if s, ok := seqScore(a.Segs, x.Segs, a.Dur, x.Dur, audFrameD); ok {
+		t.Errorf("anderes Stück gilt fälschlich als ähnlich (Score %.2f)", s)
+	}
+}

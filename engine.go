@@ -32,8 +32,11 @@ type Config struct {
 	// Stufe 4: Ähnlichkeitsanalyse
 	Similar        bool
 	AnalyzeWorkers int
+	MediaWorkers   int
 	SimMaxMB       int
 	VideoFrames    int
+
+	MaxRateMB float64 // gesamte Download-Rate in MB/s (0 = unbegrenzt)
 }
 
 const (

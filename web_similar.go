@@ -116,6 +116,8 @@ func (e *Engine) similarHandlers(mux *http.ServeMux) {
 			total = st.PairsVideo
 		case pkArchive:
 			total = st.PairsArch
+		case pkAudio:
+			total = st.PairsAudio
 		}
 		writeJSON(w, map[string]any{"pairs": out, "total": total})
 	})
@@ -156,7 +158,7 @@ func (e *Engine) similarHandlers(mux *http.ServeMux) {
 			return
 		}
 		defer rows.Close()
-		names := map[int]string{pkImage: "Bild", pkText: "Text", pkVideo: "Video", pkArchive: "Archiv (exakt)"}
+		names := map[int]string{pkImage: "Bild", pkText: "Text", pkVideo: "Video", pkAudio: "Audio", pkArchive: "Archiv (exakt)"}
 		cw := csv.NewWriter(w)
 		cw.Write([]string{"art", "aehnlichkeit_prozent", "ort_a", "eintrag_a", "groesse_a", "ort_b", "eintrag_b", "groesse_b"})
 		for rows.Next() {

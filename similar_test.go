@@ -50,9 +50,22 @@ func testOrdner(t *testing.T) string {
 
 func laufeAnalyse(t *testing.T, dir string) *Engine {
 	t.Helper()
+	return laufeAnalyseMit(t, []string{dir}, nil, 7, nil)
+}
+
+// laufeAnalyseMit startet das ganze Programm (Ordner und/oder URLs), wartet, bis alles analysiert ist,
+// und beendet es wieder. Die Datenbank bleibt für Abfragen offen.
+func laufeAnalyseMit(t *testing.T, dirs, urls []string, minAnalysiert int64, mod func(*Config)) *Engine {
+	t.Helper()
 	cfg := &Config{DB: filepath.Join(t.TempDir(), "t.db"), ProbeWorkers: 2, FetchWorkers: 2, LocalWorkers: 2,
 		PerHost: 2, ProbePerHost: 2, Chunk: 64 << 10, Retries: 2, Stall: 10 * time.Second, UserAgent: "test",
-		Similar: true, AnalyzeWorkers: 4, SimMaxMB: 64, VideoFrames: 8, ScanDirs: []string{dir}}
+		Similar: true, AnalyzeWorkers: 4, MediaWorkers: 2, SimMaxMB: 64, VideoFrames: 8, ScanDirs: dirs}
+	for _, u := range urls {
+		cfg.URLFiles = append(cfg.URLFiles, "inline:"+u)
+	}
+	if mod != nil {
+		mod(cfg)
+	}
 	w, r, err := openDB(cfg.DB)
 	if err != nil {
 		t.Fatal(err)
@@ -69,9 +82,9 @@ func laufeAnalyse(t *testing.T, dir string) *Engine {
 			continue
 		}
 		s := e.an.stats(Stats{})
-		if s.Analyzed >= 7 && s.Active == 0 {
+		if s.Analyzed >= minAnalysiert && s.Active == 0 {
 			var offen int
-			r.QueryRow(`SELECT count(*) FROM files f WHERE NOT EXISTS (SELECT 1 FROM analysis a WHERE a.file_id=f.id)`).Scan(&offen)
+			r.QueryRow(`SELECT count(*) FROM files f WHERE NOT EXISTS (SELECT 1 FROM analysis a WHERE a.file_id=f.id AND a.state<>8)`).Scan(&offen)
 			if offen == 0 {
 				break
 			}

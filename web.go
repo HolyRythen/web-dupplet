@@ -296,6 +296,7 @@ func (e *Engine) Handler() http.Handler {
 	})
 
 	e.similarHandlers(mux)
+	e.groupHandlers(mux)
 
 	if e.cfg.Auth == "" {
 		return mux

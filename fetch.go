@@ -96,13 +96,14 @@ type Fetcher struct {
 	store   string // leer = nichts speichern
 	bytes   *atomic.Int64
 	storeMu sync.Mutex
-	multi   sync.Map // Host → unterstützt Multi-Range?
+	multi   sync.Map     // Host → unterstützt Multi-Range?
+	lim     *rateLimiter // -max-rate (nil = unbegrenzt)
 }
 
 func newFetcher(cfg *Config, bytes *atomic.Int64) *Fetcher {
 	tr := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 20 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		Proxy:       http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{Timeout: 20 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		// HTTP/1.1 mit mehreren echten Verbindungen: bei HTTP/2 stauen sich tausende
 		// kleine Range-Anfragen in einer einzigen Verbindung (gemessen).
 		ForceAttemptHTTP2:     false,
@@ -123,6 +124,7 @@ func newFetcher(cfg *Config, bytes *atomic.Int64) *Fetcher {
 		client: &http.Client{Transport: tr},
 		probeC: &http.Client{Transport: ptr},
 		chunk:  cfg.Chunk, ua: cfg.UserAgent, stall: cfg.Stall, store: cfg.Store, bytes: bytes,
+		lim: newRateLimiter(cfg.MaxRateMB),
 	}
 }
 
@@ -195,17 +197,55 @@ func (f *Fetcher) Probe(ctx context.Context, url string) (int64, error) {
 	return resp.ContentLength, nil // -1 wenn unbekannt
 }
 
-// stallReader bricht ab, wenn 'stall' lang keine Daten kommen.
+// rateLimiter begrenzt die gesamte Download-Rate (Token-Bucket, -max-rate). nil = unbegrenzt.
+type rateLimiter struct {
+	mu     sync.Mutex
+	rate   float64 // Bytes pro Sekunde
+	tokens float64
+	last   time.Time
+}
+
+func newRateLimiter(mbPerSec float64) *rateLimiter {
+	if mbPerSec <= 0 {
+		return nil
+	}
+	r := mbPerSec * 1e6
+	return &rateLimiter{rate: r, tokens: r / 4, last: time.Now()}
+}
+
+// take verbucht n Bytes und wartet, falls das Budget überzogen ist.
+func (l *rateLimiter) take(n int) {
+	if l == nil || n <= 0 {
+		return
+	}
+	l.mu.Lock()
+	now := time.Now()
+	l.tokens = min(l.rate/4, l.tokens+now.Sub(l.last).Seconds()*l.rate) // höchstens 250 ms Vorrat
+	l.last = now
+	l.tokens -= float64(n)
+	var wait time.Duration
+	if l.tokens < 0 {
+		wait = time.Duration(-l.tokens / l.rate * float64(time.Second))
+	}
+	l.mu.Unlock()
+	if wait > 0 {
+		time.Sleep(wait)
+	}
+}
+
+// stallReader bricht ab, wenn 'stall' lang keine Daten kommen, und hält die Ratenbegrenzung ein.
 type stallReader struct {
-	r io.Reader
-	t *time.Timer
-	d time.Duration
-	b *atomic.Int64
+	r   io.Reader
+	t   *time.Timer
+	d   time.Duration
+	b   *atomic.Int64
+	lim *rateLimiter
 }
 
 func (s *stallReader) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
 	if n > 0 {
+		s.lim.take(n)
 		s.t.Reset(s.d)
 		s.b.Add(int64(n))
 	}
@@ -228,6 +268,7 @@ func (f *Fetcher) readRange(ctx context.Context, url string, from, to, size int6
 	if _, err := io.ReadFull(resp.Body, buf); err != nil {
 		return nil, nil, err
 	}
+	f.lim.take(len(buf))
 	f.bytes.Add(int64(len(buf)))
 	return buf, nil, nil
 }
@@ -276,6 +317,7 @@ func (f *Fetcher) readMulti(ctx context.Context, url string, c, size int64) (hea
 		if _, e := io.ReadFull(part, buf); e != nil {
 			return nil, nil, nil, false, e
 		}
+		f.lim.take(int(c))
 		f.bytes.Add(c)
 		switch from {
 		case 0:
@@ -355,7 +397,7 @@ func (f *Fetcher) streamFull(ctx context.Context, resp *http.Response, size int6
 	defer cancel()
 	t := time.AfterFunc(f.stall, cancel)
 	defer t.Stop()
-	body := &stallReader{r: resp.Body, t: t, d: f.stall, b: f.bytes}
+	body := &stallReader{r: resp.Body, t: t, d: f.stall, b: f.bytes, lim: f.lim}
 
 	var tmp *os.File
 	if f.store != "" {

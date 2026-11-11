@@ -45,9 +45,10 @@ const (
 	mtOffice
 	mtPDF
 	mtArchive
+	mtAudio
 )
 
-var mtName = map[int]string{mtImage: "Bild", mtVideo: "Video", mtText: "Text", mtOffice: "Office", mtPDF: "PDF", mtArchive: "Archiv"}
+var mtName = map[int]string{mtImage: "Bild", mtVideo: "Video", mtText: "Text", mtOffice: "Office", mtPDF: "PDF", mtArchive: "Archiv", mtAudio: "Audio"}
 
 var extType = func() map[string]int {
 	m := map[string]int{}
@@ -62,6 +63,7 @@ var extType = func() map[string]int {
 	set(mtOffice, "docx", "docm", "odt", "pptx", "odp", "xlsx", "ods")
 	set(mtPDF, "pdf")
 	set(mtArchive, "zip", "jar", "epub", "tar", "tgz", "tbz", "tbz2", "tar.gz", "tar.bz2")
+	set(mtAudio, "mp3", "ogg", "oga", "opus", "flac", "wav", "m4a", "aac", "wma", "aiff", "aif")
 	return m
 }()
 
@@ -442,31 +444,9 @@ func blobFrames(b []byte) []uint64 {
 	return f
 }
 
-// videoScore vergleicht zwei Videos Bild für Bild. ok, wenn ≥ 75 % der gemeinsam
-// auswertbaren Einzelbilder ähnlich sind und die Länge um höchstens 2 % (min. 1 s) abweicht.
+// videoScore vergleicht zwei Videos Einzelbild für Einzelbild (siehe seqScore).
 func videoScore(a, b []uint64, da, db float64) (score float64, ok bool) {
-	if len(a) != len(b) || len(a) == 0 {
-		return 0, false
-	}
-	if diff := abs(da - db); diff > max(1, 0.02*max(da, db)) {
-		return 0, false
-	}
-	var n, good, sum int
-	for i := range a {
-		if a[i] == 0 || b[i] == 0 {
-			continue
-		}
-		n++
-		d := hamming(a[i], b[i])
-		sum += d
-		if d <= vidFrameD {
-			good++
-		}
-	}
-	if n < 2 || good*4 < n*3 {
-		return 0, false
-	}
-	return 1 - float64(sum)/float64(n)/64, true
+	return seqScore(a, b, da, db, vidFrameD)
 }
 
 func abs(x float64) float64 {

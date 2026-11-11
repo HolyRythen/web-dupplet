@@ -3,12 +3,16 @@ package main
 // Stufe 4: Ähnlichkeitsanalyse (Option -similar).
 //
 // Läuft neben den Stufen 1–3 her und nimmt sich jede Datei mit bekannter Größe einmal vor:
-//   - Bilder, Videos, Texte, Office-Dokumente, PDFs und Archive bekommen Fingerabdrücke,
+//   - Bilder, Videos, Audio, Texte, Office-Dokumente, PDFs und Archive bekommen Fingerabdrücke,
 //   - jeder neue Fingerabdruck wird sofort mit allen bisherigen verglichen,
-//   - gefundene Paare landen in der Tabelle "pairs" (mit Ähnlichkeit 0–1).
+//   - gefundene Paare landen in der Tabelle "pairs" (mit Ähnlichkeit 0–1), daraus werden Gruppen (groups.go).
 //
-// Archive: Jede enthaltene Datei bekommt einen SHA-256. Liegt dieselbe Datei auch einzeln im Netz
-// (oder in einem anderen Archiv), entsteht ein Paar „exakt gleich, einmal verpackt“.
+// Archive: Jede enthaltene Datei bekommt einen SHA-256. Liegt dieselbe Datei auch einzeln vor, entsteht ein
+// Paar „exakt gleich, einmal verpackt“. Zwei Archive mit gemeinsamen Dateien ergeben EINE Zeile in "arcrel"
+// („teilen 290 Dateien“) statt hunderter Einzelpaare; byte-gleiche Archive stehen schon in den Duplikat-Gruppen.
+//
+// Videos und Audio laufen in einem eigenen Worker-Pool (langsam, netzlastig), damit Bilder/Texte nicht warten.
+// Vorübergehende Fehler (429, 5xx, Zeitüberschreitung, Netzwerk) werden nach 5 min, 30 min und 3 h wiederholt.
 //
 // Die Analyse hat eine eigene Datenbankverbindung – der Kern (Stufen 1–3) wird nicht ausgebremst.
 
@@ -39,6 +43,7 @@ const (
 	fpVideo  = 3
 	fpMember = 4 // exakter SHA-256 einer Datei in einem Archiv
 	fpWhole  = 5 // exakter SHA-256 einer einzelnen Datei (nur als Gegenstück zu fpMember)
+	fpAudio  = 6
 )
 
 // Arten von Paaren (pairs.kind)
@@ -46,7 +51,9 @@ const (
 	pkImage   = 1
 	pkText    = 2
 	pkVideo   = 3
-	pkArchive = 4
+	pkArchive = 4 // Archiv-Eintrag ↔ einzelne Datei, exakt gleich
+	pkAudio   = 5
+	pkKinds   = 6
 )
 
 // Analyse-Zustände (analysis.state)
@@ -55,6 +62,7 @@ const (
 	anSkip   = 2 // kein analysierbarer Dateityp
 	anTooBig = 3 // größer als -sim-max
 	anNoFP   = 4 // analysiert, aber nichts Vergleichbares (einfarbiges Bild, sehr kurzer Text …)
+	anRetry  = 8 // vorübergehender Fehler, wird später wiederholt
 	anFail   = 9
 )
 
@@ -65,15 +73,18 @@ const (
 	genericHits = 100      // mehr Treffer = zu allgemeiner Inhalt (leere Seite, Standardmuster) → keine Paare
 	pdfMaxImgs  = 60
 	minImgSide  = 48 // kleinere Bilder (Symbole, Linien) aus PDFs/Office ignorieren
+	maxRetries  = 3
 )
+
+var retryDelay = []time.Duration{5 * time.Minute, 30 * time.Minute, 3 * time.Hour}
 
 const simSchema = `
 CREATE TABLE IF NOT EXISTS analysis(
-  file_id INTEGER PRIMARY KEY,
-  state   INTEGER NOT NULL,
-  mt      INTEGER NOT NULL DEFAULT 0,
-  err     TEXT,
-  done    INTEGER
+  file_id  INTEGER PRIMARY KEY,
+  state    INTEGER NOT NULL,
+  mt       INTEGER NOT NULL DEFAULT 0,
+  err      TEXT,
+  done     INTEGER
 );
 CREATE TABLE IF NOT EXISTS fps(
   id      INTEGER PRIMARY KEY,
@@ -87,7 +98,7 @@ CREATE TABLE IF NOT EXISTS fps(
   dur     REAL,
   words   INTEGER,
   snip    TEXT,
-  extra   BLOB,                         -- Video: Einzelbild-Hashes; exakt: voller SHA-256
+  extra   BLOB,                         -- Video/Audio: Ausschnitt-Hashes; exakt: voller SHA-256
   cs      INTEGER,                      -- Anfang des SHA-256 der analysierten Bytes
   ex      INTEGER NOT NULL DEFAULT 0    -- 1 = Byte-Gleichheit wird schon anderswo gemeldet
 );
@@ -106,6 +117,17 @@ CREATE TABLE IF NOT EXISTS pairs(
 );
 CREATE INDEX IF NOT EXISTS pairs_score ON pairs(score DESC, id DESC);
 CREATE INDEX IF NOT EXISTS pairs_kind  ON pairs(kind, score DESC, id DESC);
+-- Archive: Zahl der (exakt verglichenen) Einträge und SHA-256 des Archivs selbst
+CREATE TABLE IF NOT EXISTS arcinfo(file_id INTEGER PRIMARY KEY, members INTEGER NOT NULL, bytes INTEGER NOT NULL, sha BLOB);
+-- Zwei verschiedene Archive mit gemeinsamen Einträgen (a < b)
+CREATE TABLE IF NOT EXISTS arcrel(
+  a INTEGER NOT NULL, b INTEGER NOT NULL,
+  shared INTEGER NOT NULL, shared_bytes INTEGER NOT NULL, found INTEGER NOT NULL,
+  PRIMARY KEY(a, b)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS arcrel_shared ON arcrel(shared_bytes DESC);
+-- vom Benutzer gewählte „behalten“-Exemplare (groups.go)
+CREATE TABLE IF NOT EXISTS keep(file_id INTEGER NOT NULL, sub TEXT NOT NULL DEFAULT '', PRIMARY KEY(file_id, sub)) WITHOUT ROWID;
 `
 
 type anJob struct {
@@ -115,7 +137,9 @@ type anJob struct {
 	Size      int64
 	FHash     []byte
 	MT        int
-	NeedWhole bool // eine Archiv-Datei hat dieselbe Größe → exakten SHA-256 bilden
+	Ext       string // Endung aus der Inhaltserkennung (sonst aus dem Pfad)
+	Sniff     bool   // Typ unbekannt → am Inhalt erkennen
+	NeedWhole bool   // eine Archiv-Datei hat dieselbe Größe → exakten SHA-256 bilden
 }
 
 // fpItem ist ein neuer Fingerabdruck (noch ohne Datenbank-ID).
@@ -136,39 +160,68 @@ type fpItem struct {
 }
 
 type anResult struct {
-	State int
-	Err   string
-	Items []fpItem
+	State     int
+	MT        int
+	Err       string
+	Transient bool
+	Items     []fpItem
+	Arc       *arcSummary // nur bei Archiven
 }
 
-type vidInfo struct {
-	file   int64
-	frames []uint64
-	dur    float64
+type arcSummary struct {
+	members int
+	bytes   int64
+	sha     []byte
 }
+
+type seqInfo struct {
+	file int64
+	segs []uint64
+	dur  float64
+}
+
+// errTransient: vorübergehender Fehler (Netz, Server überlastet) → später erneut versuchen.
+type errTransient struct{ error }
+
+func (e errTransient) Unwrap() error { return e.error }
+
+func transient(err error) error {
+	if err == nil || errors.As(err, new(errPermanent)) {
+		return err
+	}
+	return errTransient{err}
+}
+
+func isTransient(err error) bool { return errors.As(err, new(errTransient)) }
 
 type Analyzer struct {
-	e        *Engine
-	db       *sql.DB
-	t        tools
-	workers  int
-	maxBytes int64
-	frames   int
+	e            *Engine
+	db           *sql.DB
+	t            tools
+	workers      int
+	mediaWorkers int
+	maxBytes     int64
+	frames       int
 
-	jobs     chan anJob
-	inflight sync.Map
-	ranges   sync.Map // Host → unterstützt Range-Anfragen
+	jobs, mediaJobs chan anJob
+	inflight        sync.Map
+	ranges          sync.Map // Host → unterstützt Range-Anfragen
 
-	mu       sync.Mutex // Index + Schreiben gehören zusammen
-	img, txt mih
-	vid      mih
-	vidMeta  map[int64]vidInfo
-
-	cnt        [10]atomic.Int64 // Zähler je analysis.state
-	pairs      [5]atomic.Int64  // Zähler je pairs.kind
-	active     atomic.Int32
-	hasMembers atomic.Bool
-	wg         sync.WaitGroup
+	mu          sync.Mutex // Index + Schreiben gehören zusammen
+	img, txt    mih
+	vid, aud    mih
+	vidMeta     map[int64]seqInfo
+	audMeta     map[int64]seqInfo
+	cnt         [10]atomic.Int64      // Zähler je analysis.state
+	pairs       [pkKinds]atomic.Int64 // Zähler je pairs.kind
+	arcRels     atomic.Int64
+	active      atomic.Int32
+	activeMedia atomic.Int32
+	hasMembers  atomic.Bool
+	wg          sync.WaitGroup
+	changed     atomic.Int64 // erhöht sich bei jeder Änderung an Paaren/„behalten“ (für groups.go)
+	grp         groupCache
+	retryNow    chan struct{}
 }
 
 func newAnalyzer(e *Engine) (*Analyzer, error) {
@@ -180,27 +233,142 @@ func newAnalyzer(e *Engine) (*Analyzer, error) {
 	if _, err := db.Exec(simSchema); err != nil {
 		return nil, fmt.Errorf("Schema Ähnlichkeit: %w", err)
 	}
+	// Migrationen (Fehler = Spalte existiert schon)
+	db.Exec(`ALTER TABLE analysis ADD COLUMN tries INTEGER NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE analysis ADD COLUMN retry_at INTEGER`)
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS analysis_retry ON analysis(retry_at) WHERE state = 8`); err != nil {
+		return nil, err
+	}
 	a := &Analyzer{
 		e: e, db: db, t: findTools(),
-		workers:  max(1, e.cfg.AnalyzeWorkers),
-		maxBytes: int64(e.cfg.SimMaxMB) << 20,
-		frames:   max(3, e.cfg.VideoFrames),
-		vidMeta:  map[int64]vidInfo{},
+		workers:      max(1, e.cfg.AnalyzeWorkers),
+		mediaWorkers: max(1, e.cfg.MediaWorkers),
+		maxBytes:     int64(e.cfg.SimMaxMB) << 20,
+		frames:       max(3, e.cfg.VideoFrames),
+		vidMeta:      map[int64]seqInfo{},
+		audMeta:      map[int64]seqInfo{},
+		retryNow:     make(chan struct{}, 1),
 	}
 	a.jobs = make(chan anJob, a.workers*4)
+	a.mediaJobs = make(chan anJob, 4096) // groß: Videos stauen sich, ohne den Verteiler zu blockieren
 	if a.t.ffmpeg == "" {
-		log.Printf("Ähnlichkeit: ffmpeg fehlt – Videos werden übersprungen")
+		log.Printf("Ähnlichkeit: ffmpeg fehlt – Videos und Audio werden übersprungen")
 	}
 	if a.t.pdftotext == "" {
 		log.Printf("Ähnlichkeit: pdftotext/pdfimages fehlen (poppler-utils) – PDFs werden übersprungen")
 	}
+	if err := a.migrateArchives(); err != nil {
+		return nil, fmt.Errorf("Migration Archive: %w", err)
+	}
 	return a, a.load()
+}
+
+// migrateArchives (einmalig): Einzelpaare zwischen Archiv-Einträgen → eine Zeile pro Archiv-Paar.
+func (a *Analyzer) migrateArchives() error {
+	var v string
+	if a.db.QueryRow(`SELECT v FROM meta WHERE k='sim_arcrel'`).Scan(&v) == nil {
+		return nil
+	}
+	t0 := time.Now()
+	type mem struct {
+		file int64
+		size int64
+	}
+	byHash := map[string][]mem{}
+	rows, err := a.db.Query(`SELECT file_id, size, extra FROM fps WHERE kind=4`)
+	if err != nil {
+		return err
+	}
+	perFile := map[int64]*arcSummary{}
+	for rows.Next() {
+		var m mem
+		var ex []byte
+		rows.Scan(&m.file, &m.size, &ex)
+		byHash[string(ex)] = append(byHash[string(ex)], m)
+		s := perFile[m.file]
+		if s == nil {
+			s = &arcSummary{}
+			perFile[m.file] = s
+		}
+		s.members++
+		s.bytes += m.size
+	}
+	rows.Close()
+	type rel struct{ shared, bytes int64 }
+	rels := map[[2]int64]*rel{}
+	for _, ms := range byHash {
+		files := map[int64]int64{}
+		for _, m := range ms {
+			files[m.file] = m.size
+		}
+		ids := make([]int64, 0, len(files))
+		for f := range files {
+			ids = append(ids, f)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		if len(ids) > 200 { // extrem häufiger Eintrag (z.B. leere Vorlage): keine Aussage über Verwandtschaft
+			continue
+		}
+		for i := range ids {
+			for j := i + 1; j < len(ids); j++ {
+				k := [2]int64{ids[i], ids[j]}
+				r := rels[k]
+				if r == nil {
+					r = &rel{}
+					rels[k] = r
+				}
+				r.shared++
+				r.bytes += files[ids[i]]
+			}
+		}
+	}
+	fh := map[int64][]byte{}
+	if fr, err := a.db.Query(`SELECT f.id, f.fhash FROM files f WHERE f.fhash IS NOT NULL AND f.id IN (SELECT DISTINCT file_id FROM fps WHERE kind=4)`); err == nil {
+		for fr.Next() {
+			var id int64
+			var h []byte
+			fr.Scan(&id, &h)
+			fh[id] = h
+		}
+		fr.Close()
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	for f, s := range perFile {
+		tx.Exec(`INSERT OR IGNORE INTO arcinfo(file_id, members, bytes, sha) VALUES(?,?,?,?)`, f, s.members, s.bytes, fh[f])
+	}
+	n := 0
+	for k, r := range rels {
+		if ha, hb := fh[k[0]], fh[k[1]]; ha != nil && string(ha) == string(hb) {
+			continue // byte-gleiche Archive: stehen in den Duplikat-Gruppen
+		}
+		tx.Exec(`INSERT OR REPLACE INTO arcrel(a, b, shared, shared_bytes, found) VALUES(?,?,?,?,?)`, k[0], k[1], r.shared, r.bytes, now)
+		n++
+	}
+	res, err := tx.Exec(`DELETE FROM pairs WHERE kind=4 AND a IN (SELECT id FROM fps WHERE kind=4) AND b IN (SELECT id FROM fps WHERE kind=4)`)
+	if err != nil {
+		return err
+	}
+	del, _ := res.RowsAffected()
+	tx.Exec(`INSERT OR REPLACE INTO meta(k, v) VALUES('sim_arcrel', '1')`)
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if len(perFile) > 0 {
+		log.Printf("Ähnlichkeit: Archive umgestellt – %d Einzelpaare entfernt, %d Archiv-Verwandtschaften (%s)",
+			del, n, time.Since(t0).Round(time.Millisecond))
+	}
+	return nil
 }
 
 // load baut die Such-Indizes und Zähler aus der Datenbank auf (nach Neustart).
 func (a *Analyzer) load() error {
 	t0 := time.Now()
-	rows, err := a.db.Query(`SELECT id, file_id, kind, h1, coalesce(h2,0), coalesce(dur,0), extra, coalesce(cs,0), ex FROM fps WHERE kind IN (1,2,3)`)
+	rows, err := a.db.Query(`SELECT id, file_id, kind, h1, coalesce(h2,0), coalesce(dur,0), extra, coalesce(cs,0), ex FROM fps WHERE kind IN (1,2,3,6)`)
 	if err != nil {
 		return err
 	}
@@ -220,32 +388,37 @@ func (a *Analyzer) load() error {
 		n++
 	}
 	rows.Close()
-	r2, err := a.db.Query(`SELECT state, count(*) FROM analysis GROUP BY state`)
-	if err != nil {
-		return err
-	}
-	for r2.Next() {
-		var st int
-		var c int64
-		r2.Scan(&st, &c)
-		if st >= 0 && st < len(a.cnt) {
-			a.cnt[st].Store(c)
+	count := func(q string, into func(k int, c int64)) error {
+		r, err := a.db.Query(q)
+		if err != nil {
+			return err
 		}
+		defer r.Close()
+		for r.Next() {
+			var k int
+			var c int64
+			r.Scan(&k, &c)
+			into(k, c)
+		}
+		return nil
 	}
-	r2.Close()
-	r3, err := a.db.Query(`SELECT kind, count(*) FROM pairs GROUP BY kind`)
-	if err != nil {
+	if err := count(`SELECT state, count(*) FROM analysis GROUP BY state`, func(k int, c int64) {
+		if k >= 0 && k < len(a.cnt) {
+			a.cnt[k].Store(c)
+		}
+	}); err != nil {
 		return err
 	}
-	for r3.Next() {
-		var k int
-		var c int64
-		r3.Scan(&k, &c)
-		if k > 0 && k < len(a.pairs) {
+	if err := count(`SELECT kind, count(*) FROM pairs GROUP BY kind`, func(k int, c int64) {
+		if k > 0 && k < pkKinds {
 			a.pairs[k].Store(c)
 		}
+	}); err != nil {
+		return err
 	}
-	r3.Close()
+	var c int64
+	a.db.QueryRow(`SELECT count(*) FROM arcrel`).Scan(&c)
+	a.arcRels.Store(c)
 	var one int
 	if a.db.QueryRow(`SELECT 1 FROM fps WHERE kind=4 LIMIT 1`).Scan(&one) == nil {
 		a.hasMembers.Store(true)
@@ -262,12 +435,16 @@ func (a *Analyzer) index(id int64, it fpItem) {
 		a.img.add(mihEntry{fp: id, file: it.File, h: it.H1, aux: it.H2, cs: it.CS, ex: it.Ex})
 	case fpText:
 		a.txt.add(mihEntry{fp: id, file: it.File, h: it.H1, cs: it.CS, ex: it.Ex})
-	case fpVideo:
-		fr := blobFrames(it.Extra)
-		a.vidMeta[id] = vidInfo{file: it.File, frames: fr, dur: it.Dur}
-		for i, h := range fr {
+	case fpVideo, fpAudio:
+		segs := blobFrames(it.Extra)
+		m, meta := &a.vid, a.vidMeta
+		if it.Kind == fpAudio {
+			m, meta = &a.aud, a.audMeta
+		}
+		meta[id] = seqInfo{file: it.File, segs: segs, dur: it.Dur}
+		for i, h := range segs {
 			if h != 0 {
-				a.vid.add(mihEntry{fp: id, file: it.File, h: h, aux: uint64(i)})
+				m.add(mihEntry{fp: id, file: it.File, h: h, aux: uint64(i)})
 			}
 		}
 	}
@@ -284,25 +461,34 @@ func shaPrefix(b []byte) uint64 {
 }
 
 func (a *Analyzer) run(ctx context.Context) {
-	for i := 0; i < a.workers; i++ {
-		a.wg.Add(1)
-		go func() {
-			defer a.wg.Done()
-			for j := range a.jobs {
-				a.active.Add(1)
-				res := a.analyze(ctx, j)
-				if ctx.Err() == nil || res.State != anFail {
-					if err := a.commit(j, res); err != nil {
-						log.Printf("Ähnlichkeit speichern (%s): %v", j.Loc, err)
+	spawn := func(n int, q chan anJob, act *atomic.Int32) {
+		for i := 0; i < n; i++ {
+			a.wg.Add(1)
+			go func() {
+				defer a.wg.Done()
+				for j := range q {
+					a.active.Add(1)
+					act.Add(1)
+					res := a.analyze(ctx, j)
+					if ctx.Err() == nil || res.State != anFail {
+						if err := a.commit(j, res); err != nil {
+							log.Printf("Ähnlichkeit speichern (%s): %v", j.Loc, err)
+						}
 					}
+					a.inflight.Delete(j.ID)
+					act.Add(-1)
+					a.active.Add(-1)
 				}
-				a.inflight.Delete(j.ID)
-				a.active.Add(-1)
-			}
-		}()
+			}()
+		}
 	}
+	var general atomic.Int32
+	spawn(a.workers, a.jobs, &general)
+	spawn(a.mediaWorkers, a.mediaJobs, &a.activeMedia)
+	go a.groupLoop(ctx)
 	a.dispatch(ctx)
 	close(a.jobs)
+	close(a.mediaJobs)
 	done := make(chan struct{})
 	go func() { a.wg.Wait(); close(done) }()
 	select {
@@ -313,23 +499,26 @@ func (a *Analyzer) run(ctx context.Context) {
 	a.db.Close()
 }
 
-// dispatch sucht Dateien ohne Analyse und verteilt sie auf die Worker.
+type dispRow struct {
+	id    int64
+	loc   string
+	kind  int
+	size  int64
+	fhash []byte
+}
+
+// dispatch sucht Dateien ohne Analyse (und fällige Wiederholungen) und verteilt sie auf die Worker.
 func (a *Analyzer) dispatch(ctx context.Context) {
 	var cursor int64
 	sleep := func(d time.Duration) bool {
 		select {
 		case <-ctx.Done():
 			return false
+		case <-a.retryNow:
+			return true
 		case <-time.After(d):
 			return true
 		}
-	}
-	type row struct {
-		id    int64
-		loc   string
-		kind  int
-		size  int64
-		fhash []byte
 	}
 	for ctx.Err() == nil {
 		if a.e.paused.Load() {
@@ -338,6 +527,23 @@ func (a *Analyzer) dispatch(ctx context.Context) {
 			}
 			continue
 		}
+		// 1. fällige Wiederholungen
+		if rs, err := a.e.rdb.QueryContext(ctx, `SELECT f.id, f.loc, f.kind, f.size, f.fhash FROM analysis x
+			JOIN files f ON f.id = x.file_id WHERE x.state = 8 AND coalesce(x.retry_at,0) <= ? LIMIT 200`, time.Now().Unix()); err == nil {
+			var retry []dispRow
+			for rs.Next() {
+				var r dispRow
+				rs.Scan(&r.id, &r.loc, &r.kind, &r.size, &r.fhash)
+				retry = append(retry, r)
+			}
+			rs.Close()
+			for _, r := range retry {
+				if !a.send(ctx, r, nil) {
+					return
+				}
+			}
+		}
+		// 2. neue Dateien
 		rs, err := a.e.rdb.QueryContext(ctx, `SELECT f.id, f.loc, f.kind, f.size, f.fhash FROM files f
 			WHERE f.id > ? AND f.size >= 0 AND f.state BETWEEN 1 AND 3
 			  AND NOT EXISTS (SELECT 1 FROM analysis x WHERE x.file_id = f.id)
@@ -351,9 +557,9 @@ func (a *Analyzer) dispatch(ctx context.Context) {
 			}
 			continue
 		}
-		var batch []row
+		var batch []dispRow
 		for rs.Next() {
-			var r row
+			var r dispRow
 			rs.Scan(&r.id, &r.loc, &r.kind, &r.size, &r.fhash)
 			batch = append(batch, r)
 		}
@@ -365,36 +571,52 @@ func (a *Analyzer) dispatch(ctx context.Context) {
 			}
 			continue
 		}
-		now := time.Now().Unix()
 		var quick [][3]int64 // file_id, state, mt
 		for _, r := range batch {
 			cursor = r.id
-			if _, busy := a.inflight.Load(r.id); busy {
-				continue
-			}
-			mt := classify(r.loc)
-			needWhole := a.hasMembers.Load() && r.size >= minExact && a.memberWithSize(r.size)
-			switch {
-			case mt == mtNone && !needWhole:
-				quick = append(quick, [3]int64{r.id, anSkip, mtNone})
-				continue
-			case mt != mtVideo && r.size > a.maxBytes:
-				quick = append(quick, [3]int64{r.id, anTooBig, int64(mt)})
-				continue
-			}
-			a.inflight.Store(r.id, true)
-			select {
-			case a.jobs <- anJob{ID: r.id, Loc: r.loc, Kind: r.kind, Size: r.size, FHash: r.fhash, MT: mt, NeedWhole: needWhole}:
-			case <-ctx.Done():
-				a.inflight.Delete(r.id)
+			if !a.send(ctx, r, &quick) {
 				return
 			}
 		}
 		if len(quick) > 0 {
-			if err := a.markMany(quick, now); err != nil {
+			if err := a.markMany(quick, time.Now().Unix()); err != nil {
 				log.Printf("Ähnlichkeit: %v", err)
 			}
 		}
+	}
+}
+
+// send ordnet eine Datei ein: sofort erledigt (quick) oder an den passenden Worker-Pool.
+// quick == nil: Wiederholung – immer an einen Worker.
+func (a *Analyzer) send(ctx context.Context, r dispRow, quick *[][3]int64) bool {
+	if _, busy := a.inflight.Load(r.id); busy {
+		return true
+	}
+	mt := classify(r.loc)
+	snf := mt == mtNone && (r.kind == kindLocal || extOf(r.loc) == "")
+	needWhole := a.hasMembers.Load() && r.size >= minExact && a.memberWithSize(r.size)
+	if quick != nil {
+		switch {
+		case mt == mtNone && !snf && !needWhole:
+			*quick = append(*quick, [3]int64{r.id, anSkip, mtNone})
+			return true
+		case mt != mtVideo && mt != mtAudio && mt != mtNone && r.size > a.maxBytes:
+			*quick = append(*quick, [3]int64{r.id, anTooBig, int64(mt)})
+			return true
+		}
+	}
+	j := anJob{ID: r.id, Loc: r.loc, Kind: r.kind, Size: r.size, FHash: r.fhash, MT: mt, Sniff: snf, NeedWhole: needWhole}
+	q := a.jobs
+	if (mt == mtVideo || mt == mtAudio) && !needWhole {
+		q = a.mediaJobs
+	}
+	a.inflight.Store(r.id, true)
+	select {
+	case q <- j:
+		return true
+	case <-ctx.Done():
+		a.inflight.Delete(r.id)
+		return false
 	}
 }
 
@@ -413,33 +635,74 @@ func (a *Analyzer) markMany(rows [][3]int64, now int64) error {
 		tx.Rollback()
 		return err
 	}
+	var added []int64
 	for _, r := range rows {
-		st.Exec(r[0], r[1], r[2], now)
+		if res, err := st.Exec(r[0], r[1], r[2], now); err == nil {
+			if c, _ := res.RowsAffected(); c > 0 {
+				added = append(added, r[1])
+			}
+		}
 	}
 	st.Close()
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	for _, r := range rows {
-		a.cnt[r[1]].Add(1)
+	for _, s := range added {
+		a.cnt[s].Add(1)
 	}
 	return nil
+}
+
+// RetryFailed setzt endgültig fehlgeschlagene Analysen zurück (Knopf in der Web-UI).
+func (a *Analyzer) RetryFailed() (int64, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	res, err := a.db.Exec(`UPDATE analysis SET state=8, tries=0, retry_at=0 WHERE state=9`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	a.cnt[anFail].Add(-n)
+	a.cnt[anRetry].Add(n)
+	select {
+	case a.retryNow <- struct{}{}:
+	default:
+	}
+	return n, nil
 }
 
 // ---------- Analyse einer Datei ----------
 
 func (a *Analyzer) analyze(ctx context.Context, j anJob) (res anResult) {
-	fail := func(err error) anResult { return anResult{State: anFail, Err: err.Error()} }
-	ext := extOf(j.Loc)
+	fail := func(err error) anResult {
+		return anResult{State: anFail, MT: j.MT, Err: err.Error(), Transient: isTransient(err)}
+	}
+	if j.Sniff {
+		mt, ext, err := a.sniffJob(ctx, j)
+		if err != nil {
+			return fail(err)
+		}
+		j.MT, j.Ext = mt, ext
+		switch {
+		case mt == mtNone && !j.NeedWhole:
+			return anResult{State: anSkip}
+		case mt != mtVideo && mt != mtAudio && mt != mtNone && j.Size > a.maxBytes:
+			return anResult{State: anTooBig, MT: mt}
+		}
+	}
+	ext := j.Ext
+	if ext == "" {
+		ext = extOf(j.Loc)
+	}
 
-	// Videos werden nicht heruntergeladen: ffmpeg springt per Range-Anfrage zu den Einzelbildern.
-	if j.MT == mtVideo && !j.NeedWhole {
+	// Videos/Audio werden nicht heruntergeladen: ffmpeg springt per Range-Anfrage zu den Ausschnitten.
+	if (j.MT == mtVideo || j.MT == mtAudio) && !j.NeedWhole {
 		src := j.Loc
 		if j.Kind == kindHTTP && !a.rangeOK(ctx, j.Loc) {
 			// Ohne Range-Unterstützung kann ffmpeg nicht springen und liefert stillschweigend
-			// falsche Einzelbilder → dann komplett laden (sofern nicht größer als -sim-max).
+			// falsche Ausschnitte → dann komplett laden (sofern nicht größer als -sim-max).
 			if j.Size > a.maxBytes {
-				return fail(fmt.Errorf("Server kann keine Teil-Downloads und Video ist größer als -sim-max (%d MB)", a.maxBytes>>20))
+				return fail(fmt.Errorf("Server kann keine Teil-Downloads und Datei ist größer als -sim-max (%d MB)", a.maxBytes>>20))
 			}
 			file, _, cleanup, err := a.download(ctx, j.Loc, j.Size)
 			if err != nil {
@@ -448,12 +711,14 @@ func (a *Analyzer) analyze(ctx context.Context, j anJob) (res anResult) {
 			defer cleanup()
 			src = file
 		}
-		vf, err := a.t.videoFingerprint(ctx, src, a.e.cfg.UserAgent, a.frames)
+		it, err := a.media(ctx, j, src)
 		if err != nil {
+			if j.Kind == kindHTTP && src == j.Loc {
+				err = transient(err) // Server/Netz kann der Grund sein
+			}
 			return fail(err)
 		}
-		return anResult{State: anDone, Items: []fpItem{{File: j.ID, Kind: fpVideo, Size: j.Size, Dur: vf.Dur,
-			Extra: framesBlob(vf.Frames), Thumb: vf.Thumb}}}
+		return anResult{State: anDone, MT: j.MT, Items: []fpItem{it}}
 	}
 
 	file, sha, cleanup, err := a.obtain(ctx, j)
@@ -486,17 +751,26 @@ func (a *Analyzer) analyze(ctx context.Context, j anJob) (res anResult) {
 		if e2 != nil {
 			errs = append(errs, e2.Error())
 		}
-	case mtVideo: // nur hier, wenn auch ein exakter Abgleich nötig war (Datei liegt schon vor)
-		if vf, err := a.t.videoFingerprint(ctx, file, a.e.cfg.UserAgent, a.frames); err == nil {
-			items = append(items, fpItem{File: j.ID, Kind: fpVideo, Size: j.Size, Dur: vf.Dur, Extra: framesBlob(vf.Frames), Thumb: vf.Thumb})
+	case mtVideo, mtAudio: // nur hier, wenn auch ein exakter Abgleich nötig war (Datei liegt schon vor)
+		if it, err := a.media(ctx, j, file); err == nil {
+			items = append(items, it)
 		} else {
 			errs = append(errs, err.Error())
 		}
 	case mtArchive:
-		it, e2 := a.archive(ctx, j, file, ext, tmp)
+		if sha == nil {
+			if sha, err = fileSHA(file, &a.e.bytesRead); err != nil {
+				return fail(err)
+			}
+		}
+		it, sum, e2 := a.archive(ctx, j, file, ext, tmp)
 		items = append(items, it...)
 		if e2 != nil {
 			errs = append(errs, e2.Error())
+		}
+		if sum != nil {
+			sum.sha = sha
+			res.Arc = sum
 		}
 	}
 	if j.NeedWhole && sha != nil {
@@ -512,9 +786,52 @@ func (a *Analyzer) analyze(ctx context.Context, j anJob) (res anResult) {
 	default:
 		res.State = anNoFP
 	}
+	res.MT = j.MT
 	res.Items = items
 	res.Err = strings.Join(errs, "; ")
 	return res
+}
+
+// media: Fingerabdruck für Video oder Audio (src = URL oder lokaler Pfad).
+func (a *Analyzer) media(ctx context.Context, j anJob, src string) (fpItem, error) {
+	if j.MT == mtAudio {
+		af, err := a.t.audioFingerprint(ctx, src, a.e.cfg.UserAgent, a.frames)
+		if err != nil {
+			return fpItem{}, err
+		}
+		return fpItem{File: j.ID, Kind: fpAudio, Size: j.Size, Dur: af.Dur, Extra: framesBlob(af.Segs)}, nil
+	}
+	vf, err := a.t.videoFingerprint(ctx, src, a.e.cfg.UserAgent, a.frames)
+	if err != nil {
+		return fpItem{}, err
+	}
+	return fpItem{File: j.ID, Kind: fpVideo, Size: j.Size, Dur: vf.Dur, Extra: framesBlob(vf.Frames), Thumb: vf.Thumb}, nil
+}
+
+// sniffJob liest die ersten Bytes (lokal bzw. per Range-Anfrage) und erkennt daran den Typ.
+func (a *Analyzer) sniffJob(ctx context.Context, j anJob) (int, string, error) {
+	if j.Kind == kindLocal {
+		fd, err := os.Open(j.Loc)
+		if err != nil {
+			return mtNone, "", errPermanent{err}
+		}
+		defer fd.Close()
+		b := make([]byte, sniffLen)
+		n, _ := io.ReadFull(fd, b)
+		mt, ext := sniff(b[:n], "")
+		return mt, ext, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*a.e.fet.stall)
+	defer cancel()
+	resp, err := a.e.fet.req(ctx, http.MethodGet, j.Loc, fmt.Sprintf("bytes=0-%d", sniffLen-1))
+	if err != nil {
+		return mtNone, "", transient(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, sniffLen))
+	a.e.bytesRead.Add(int64(len(b)))
+	mt, ext := sniff(b, resp.Header.Get("Content-Type"))
+	return mt, ext, nil
 }
 
 // rangeOK: Beantwortet der Server Range-Anfragen mit 206? (Ergebnis pro Host gemerkt)
@@ -567,6 +884,7 @@ func fileSHA(p string, n *atomic.Int64) ([]byte, error) {
 }
 
 // download lädt eine URL vollständig in eine temporäre Datei (mit SHA-256, Abbruch bei Stillstand).
+// Netz- und Serverfehler sind vorübergehend (errTransient), 404/403 & Co. endgültig.
 func (a *Analyzer) download(ctx context.Context, loc string, size int64) (string, []byte, func(), error) {
 	noop := func() {}
 	ctx, cancel := context.WithCancel(ctx)
@@ -574,11 +892,11 @@ func (a *Analyzer) download(ctx context.Context, loc string, size int64) (string
 	f := a.e.fet
 	resp, err := f.req(ctx, http.MethodGet, loc, "")
 	if err != nil {
-		return "", nil, noop, err
+		return "", nil, noop, transient(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", nil, noop, fmt.Errorf("unerwarteter Status %d", resp.StatusCode)
+		return "", nil, noop, transient(fmt.Errorf("unerwarteter Status %d", resp.StatusCode))
 	}
 	tmp, err := os.CreateTemp("", "wd-dl-*")
 	if err != nil {
@@ -588,10 +906,11 @@ func (a *Analyzer) download(ctx context.Context, loc string, size int64) (string
 	t := time.AfterFunc(f.stall, cancel)
 	defer t.Stop()
 	h := sha256.New()
-	body := &stallReader{r: resp.Body, t: t, d: f.stall, b: f.bytes}
+	body := &stallReader{r: resp.Body, t: t, d: f.stall, b: f.bytes, lim: f.lim}
 	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(body, a.maxBytes+1))
 	if err == nil && n > a.maxBytes {
-		err = fmt.Errorf("größer als -sim-max (%d MB)", a.maxBytes>>20)
+		cleanup()
+		return "", nil, noop, fmt.Errorf("größer als -sim-max (%d MB)", a.maxBytes>>20)
 	}
 	if err == nil && size >= 0 && n != size {
 		err = errChanged
@@ -601,7 +920,7 @@ func (a *Analyzer) download(ctx context.Context, loc string, size int64) (string
 		if ctx.Err() != nil && !errors.Is(err, errChanged) {
 			err = fmt.Errorf("Download abgebrochen (>%s ohne Daten oder Programmende)", f.stall)
 		}
-		return "", nil, noop, err
+		return "", nil, noop, transient(err)
 	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
@@ -715,13 +1034,14 @@ func (a *Analyzer) pdf(ctx context.Context, file int64, sub, path string, size i
 }
 
 // archive: exakter SHA-256 für jeden Eintrag + inhaltliche Analyse kleinerer Einträge.
-func (a *Analyzer) archive(ctx context.Context, j anJob, file, ext, tmp string) ([]fpItem, error) {
+func (a *Analyzer) archive(ctx context.Context, j anJob, file, ext, tmp string) ([]fpItem, *arcSummary, error) {
 	var out []fpItem
 	type mem struct {
 		sha  []byte
 		size int64
 	}
 	var members []mem
+	sum := &arcSummary{}
 	err := walkArchive(file, ext, func(name string, size int64, r io.Reader) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -729,7 +1049,7 @@ func (a *Analyzer) archive(ctx context.Context, j anJob, file, ext, tmp string) 
 		h := sha256.New()
 		mt := classify(name)
 		var buf []byte
-		if mt != mtNone && mt != mtVideo && mt != mtArchive && size <= memBufMax {
+		if mt != mtNone && mt != mtVideo && mt != mtAudio && mt != mtArchive && size <= memBufMax {
 			b, err := io.ReadAll(io.TeeReader(r, h))
 			if err != nil {
 				return nil // beschädigter Eintrag: weiter mit dem nächsten
@@ -742,6 +1062,8 @@ func (a *Analyzer) archive(ctx context.Context, j anJob, file, ext, tmp string) 
 		if size >= minExact {
 			out = append(out, fpItem{File: j.ID, Sub: name, Kind: fpMember, H1: binary.BigEndian.Uint64(sha), Size: size, Extra: sha})
 			members = append(members, mem{sha, size})
+			sum.members++
+			sum.bytes += size
 		}
 		if buf != nil {
 			if mt == mtPDF {
@@ -759,13 +1081,13 @@ func (a *Analyzer) archive(ctx context.Context, j anJob, file, ext, tmp string) 
 		return nil
 	})
 	if err != nil && len(out) == 0 {
-		return nil, fmt.Errorf("Archiv: %v", err)
+		return nil, nil, fmt.Errorf("Archiv: %v", err)
 	}
-	// Gegenstücke im Netz: einzelne Dateien mit gleicher Größe exakt prüfen
+	// Gegenstücke: einzelne Dateien mit gleicher Größe exakt prüfen
 	for _, m := range members {
 		out = append(out, a.counterparts(ctx, j.ID, m.sha, m.size)...)
 	}
-	return out, nil
+	return out, sum, nil
 }
 
 // counterparts: einzelne Dateien gleicher Größe, deren SHA-256 dem Archiv-Eintrag entspricht.
@@ -821,6 +1143,11 @@ type pairCand struct {
 	kind  int
 }
 
+type fpAdded struct {
+	id int64
+	it fpItem
+}
+
 func (a *Analyzer) commit(j anJob, res anResult) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -831,27 +1158,22 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 	defer tx.Rollback()
 	now := time.Now().Unix()
 
+	prevState, prevTries := -1, 0
+	tx.QueryRow(`SELECT state, tries FROM analysis WHERE file_id=?`, j.ID).Scan(&prevState, &prevTries)
+
 	insFP, err := tx.Prepare(`INSERT INTO fps(file_id, sub, kind, h1, h2, size, w, h, dur, words, snip, extra, cs, ex)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
 	defer insFP.Close()
-	type added struct {
-		id int64
-		it fpItem
-	}
-	var news []added
-	var pairs []struct {
+	var news []fpAdded
+	type pairRec struct {
 		a, b int64
 		pairCand
 	}
-	addPair := func(x int64, c pairCand) {
-		pairs = append(pairs, struct {
-			a, b int64
-			pairCand
-		}{min(x, c.other), max(x, c.other), c})
-	}
+	var pairs []pairRec
+	addPair := func(x int64, c pairCand) { pairs = append(pairs, pairRec{min(x, c.other), max(x, c.other), c}) }
 	for _, it := range res.Items {
 		if it.Kind == fpWhole {
 			// höchstens ein exakter Fingerabdruck pro Datei (kann vom Archiv-Abgleich oder der Datei selbst kommen)
@@ -860,8 +1182,7 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 				continue
 			}
 		}
-		var w, h, words any
-		var dur any
+		var w, h, words, dur, snip, cs any
 		if it.W > 0 {
 			w, h = it.W, it.H
 		}
@@ -871,11 +1192,9 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 		if it.Dur > 0 {
 			dur = it.Dur
 		}
-		var snip any
 		if it.Snip != "" {
 			snip = it.Snip
 		}
-		var cs any
 		if it.CS != 0 {
 			cs = int64(it.CS)
 		}
@@ -887,10 +1206,13 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 		if len(it.Thumb) > 0 {
 			tx.Exec(`INSERT OR REPLACE INTO thumbs(fp, jpg) VALUES(?,?)`, id, it.Thumb)
 		}
-		news = append(news, added{id, it})
+		news = append(news, fpAdded{id, it})
 	}
 
-	// Vergleich gegen alles Bisherige (und gegen die übrigen neuen Einträge dieser Datei)
+	// Archiv-Verwandtschaft: andere Archive → gemeinsame Einträge (SHA-256 → Größe)
+	shared := map[int64]map[string]int64{}
+
+	// Vergleich gegen alles Bisherige
 	for _, n := range news {
 		var cands []pairCand
 		switch n.it.Kind {
@@ -906,21 +1228,25 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 					cands = append(cands, pairCand{x.fp, 1 - float64(d)/64, pkText})
 				}
 			})
-		case fpVideo:
-			fr := blobFrames(n.it.Extra)
+		case fpVideo, fpAudio:
+			m, meta, thr, pk := &a.vid, a.vidMeta, vidFrameD, pkVideo
+			if n.it.Kind == fpAudio {
+				m, meta, thr, pk = &a.aud, a.audMeta, audFrameD, pkAudio
+			}
+			segs := blobFrames(n.it.Extra)
 			seen := map[int64]bool{}
-			for _, h := range fr {
+			for _, h := range segs {
 				if h == 0 {
 					continue
 				}
-				a.vid.near(h, 7, func(x mihEntry, d int) {
+				m.near(h, 7, func(x mihEntry, d int) {
 					if seen[x.fp] || x.file == n.it.File {
 						return
 					}
 					seen[x.fp] = true
-					v := a.vidMeta[x.fp]
-					if s, ok := videoScore(fr, v.frames, n.it.Dur, v.dur); ok {
-						cands = append(cands, pairCand{x.fp, s, pkVideo})
+					v := meta[x.fp]
+					if s, ok := seqScore(segs, v.segs, n.it.Dur, v.dur, thr); ok {
+						cands = append(cands, pairCand{x.fp, s, pk})
 					}
 				})
 			}
@@ -934,12 +1260,21 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 				var kind int
 				var ex []byte
 				rows.Scan(&id, &file, &kind, &ex)
-				// zwei einzelne Dateien sind Sache der Stufen 1–3; Einträge im selben Archiv ignorieren
-				if string(ex) != string(n.it.Extra) || (kind == fpWhole && n.it.Kind == fpWhole) ||
-					(file == n.it.File && kind == fpMember && n.it.Kind == fpMember) {
+				if string(ex) != string(n.it.Extra) || file == n.it.File {
 					continue
 				}
-				cands = append(cands, pairCand{id, 1, pkArchive})
+				switch {
+				case kind == fpWhole && n.it.Kind == fpWhole:
+					// zwei einzelne Dateien sind Sache der Stufen 1–3
+				case kind == fpMember && n.it.Kind == fpMember:
+					// zwei Archive mit demselben Eintrag → Archiv-Verwandtschaft statt Einzelpaar
+					if shared[file] == nil {
+						shared[file] = map[string]int64{}
+					}
+					shared[file][string(ex)] = n.it.Size
+				default:
+					cands = append(cands, pairCand{id, 1, pkArchive})
+				}
 			}
 			rows.Close()
 		}
@@ -955,7 +1290,7 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 		}
 	}
 
-	var newPairs [5]int64
+	var newPairs [pkKinds]int64
 	for _, p := range pairs {
 		r, err := tx.Exec(`INSERT OR IGNORE INTO pairs(kind, a, b, score, found) VALUES(?,?,?,?,?)`, p.kind, p.a, p.b, p.score, now)
 		if err != nil {
@@ -965,12 +1300,51 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 			newPairs[p.kind]++
 		}
 	}
+
+	// Archive: Kennzahlen speichern, Verwandtschaft zu anderen (nicht byte-gleichen) Archiven
+	var newRels int64
+	if res.Arc != nil {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO arcinfo(file_id, members, bytes, sha) VALUES(?,?,?,?)`,
+			j.ID, res.Arc.members, res.Arc.bytes, res.Arc.sha); err != nil {
+			return err
+		}
+		for other, set := range shared {
+			var osha, ofh, mfh []byte
+			tx.QueryRow(`SELECT i.sha, f.fhash FROM files f LEFT JOIN arcinfo i ON i.file_id = f.id WHERE f.id=?`, other).Scan(&osha, &ofh)
+			tx.QueryRow(`SELECT fhash FROM files WHERE id=?`, j.ID).Scan(&mfh)
+			if (osha != nil && string(osha) == string(res.Arc.sha)) || (ofh != nil && string(ofh) == string(res.Arc.sha)) ||
+				(mfh != nil && ofh != nil && string(mfh) == string(ofh)) {
+				continue // byte-gleiches Archiv: steht in den Duplikat-Gruppen
+			}
+			var b int64
+			for _, s := range set {
+				b += s
+			}
+			x, y := min(j.ID, other), max(j.ID, other)
+			var one int
+			isNew := tx.QueryRow(`SELECT 1 FROM arcrel WHERE a=? AND b=?`, x, y).Scan(&one) != nil
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO arcrel(a, b, shared, shared_bytes, found) VALUES(?,?,?,?,?)`,
+				x, y, len(set), b, now); err != nil {
+				return err
+			}
+			if isNew {
+				newRels++
+			}
+		}
+	}
+
+	state, tries := res.State, prevTries // Zahl der Versuche bleibt sichtbar
+	var retryAt any
+	if state == anFail && res.Transient && prevTries < maxRetries {
+		state, tries = anRetry, prevTries+1
+		retryAt = now + int64(retryDelay[prevTries]/time.Second)
+	}
 	var errv any
 	if res.Err != "" {
 		errv = res.Err
 	}
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO analysis(file_id, state, mt, err, done) VALUES(?,?,?,?,?)`,
-		j.ID, res.State, j.MT, errv, now); err != nil {
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO analysis(file_id, state, mt, err, done, tries, retry_at) VALUES(?,?,?,?,?,?,?)`,
+		j.ID, state, res.MT, errv, now, tries, retryAt); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -980,15 +1354,21 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 	for _, n := range news {
 		a.index(n.id, n.it)
 	}
-	a.cnt[res.State].Add(1)
+	if prevState >= 0 && prevState < len(a.cnt) {
+		a.cnt[prevState].Add(-1)
+	}
+	a.cnt[state].Add(1)
+	var total int64
 	for k, c := range newPairs {
 		a.pairs[k].Add(c)
+		total += c
 	}
-	for _, n := range news {
-		if n.it.Kind == fpMember {
-			a.hasMembers.Store(true)
-			break
-		}
+	a.arcRels.Add(newRels)
+	if total > 0 || newRels > 0 {
+		a.changed.Add(1)
+	}
+	if res.Arc != nil && res.Arc.members > 0 {
+		a.hasMembers.Store(true)
 	}
 	return nil
 }
@@ -996,33 +1376,45 @@ func (a *Analyzer) commit(j anJob, res anResult) error {
 // ---------- Statistik ----------
 
 type SimStats struct {
-	Analyzed   int64    `json:"analyzed"`
-	Done       int64    `json:"done"`
-	Skipped    int64    `json:"skipped"`
-	NoFP       int64    `json:"noFP"`
-	TooBig     int64    `json:"tooBig"`
-	Failed     int64    `json:"failed"`
-	Pending    int64    `json:"pending"`
-	Active     int32    `json:"active"`
-	Pairs      int64    `json:"pairs"`
-	PairsImage int64    `json:"pairsImage"`
-	PairsText  int64    `json:"pairsText"`
-	PairsVideo int64    `json:"pairsVideo"`
-	PairsArch  int64    `json:"pairsArchive"`
-	Missing    []string `json:"missing,omitempty"`
+	Analyzed    int64    `json:"analyzed"`
+	Done        int64    `json:"done"`
+	Skipped     int64    `json:"skipped"`
+	NoFP        int64    `json:"noFP"`
+	TooBig      int64    `json:"tooBig"`
+	Retry       int64    `json:"retry"`
+	Failed      int64    `json:"failed"`
+	Pending     int64    `json:"pending"`
+	Active      int32    `json:"active"`
+	ActiveMedia int32    `json:"activeMedia"`
+	QueuedMedia int      `json:"queuedMedia"`
+	Pairs       int64    `json:"pairs"`
+	PairsImage  int64    `json:"pairsImage"`
+	PairsText   int64    `json:"pairsText"`
+	PairsVideo  int64    `json:"pairsVideo"`
+	PairsAudio  int64    `json:"pairsAudio"`
+	PairsArch   int64    `json:"pairsArchive"`
+	ArcRels     int64    `json:"arcRels"`
+	Groups      int      `json:"groups"`
+	Savings     int64    `json:"savings"`
+	SafeSavings int64    `json:"safeSavings"`
+	Missing     []string `json:"missing,omitempty"`
 }
 
 func (a *Analyzer) stats(base Stats) *SimStats {
 	s := &SimStats{
 		Done: a.cnt[anDone].Load(), Skipped: a.cnt[anSkip].Load(), NoFP: a.cnt[anNoFP].Load(),
-		TooBig: a.cnt[anTooBig].Load(), Failed: a.cnt[anFail].Load(), Active: a.active.Load(),
+		TooBig: a.cnt[anTooBig].Load(), Retry: a.cnt[anRetry].Load(), Failed: a.cnt[anFail].Load(),
+		Active: a.active.Load(), ActiveMedia: a.activeMedia.Load(), QueuedMedia: len(a.mediaJobs),
 		PairsImage: a.pairs[pkImage].Load(), PairsText: a.pairs[pkText].Load(),
-		PairsVideo: a.pairs[pkVideo].Load(), PairsArch: a.pairs[pkArchive].Load(),
+		PairsVideo: a.pairs[pkVideo].Load(), PairsAudio: a.pairs[pkAudio].Load(), PairsArch: a.pairs[pkArchive].Load(),
+		ArcRels: a.arcRels.Load(),
 	}
-	s.Analyzed = s.Done + s.Skipped + s.NoFP + s.TooBig + s.Failed
-	s.Pairs = s.PairsImage + s.PairsText + s.PairsVideo + s.PairsArch
+	s.Analyzed = s.Done + s.Skipped + s.NoFP + s.TooBig + s.Retry + s.Failed
+	s.Pairs = s.PairsImage + s.PairsText + s.PairsVideo + s.PairsAudio + s.PairsArch
 	// Dateien mit bekannter Größe, die noch keine Analyse haben (Näherung)
 	s.Pending = max(0, base.Total-base.NeedProbe-base.Errors-s.Analyzed)
+	g := a.grp.get()
+	s.Groups, s.Savings, s.SafeSavings = len(g.groups), g.savings, g.safeSavings
 	if a.t.ffmpeg == "" || a.t.ffprobe == "" {
 		s.Missing = append(s.Missing, "ffmpeg")
 	}
