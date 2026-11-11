@@ -2,7 +2,10 @@ module web-dupplet
 
 go 1.26.11
 
-require modernc.org/sqlite v1.61.0
+require (
+	golang.org/x/image v0.33.0
+	modernc.org/sqlite v1.61.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
