@@ -25,11 +25,15 @@ Nützlich:
                        sudo ./uninstall.sh --alles  (alles weg)
 
 Ähnlichkeitsanalyse (Stufe 4, standardmäßig an):
-  Findet zusätzlich ähnliche Inhalte – Bilder in anderer Größe/anderem Format, Videos in anderer
-  Qualität, Texte als PDF/DOCX/HTML/TXT, Bilder in PDFs und Office-Dateien, Dateien in Archiven.
-  Einstellung in /etc/web-dupplet.env:  SIMILAR=-similar -analyze-workers 4 -sim-max 512
+  Findet zusätzlich ähnliche Inhalte – Bilder in anderer Größe/anderem Format, Videos und Audio in
+  anderer Qualität, Texte als PDF/DOCX/HTML/TXT, Bilder in PDFs und Office-Dateien, Dateien in Archiven.
+  In der Web-UI unter „Aufräumen“: Gruppen mit Vorschlag zum Behalten, CSV-Liste und Aufräum-Skript
+  (verschiebt nur lokale Dateien, Probelauf bis AUSFUEHREN=1).
+  Einstellung in /etc/web-dupplet.env:
+    SIMILAR=-similar -analyze-workers 6 -media-workers 2 -sim-max 512
   Abschalten: SIMILAR= (leer) und neu starten.
   Achtung: Dafür werden Bilder, Dokumente und Archive komplett geladen (bis -sim-max MB).
+  Download-Rate begrenzen (z.B. auf geteilten Servern): EXTRA=-max-rate 50   (MB/s)
 
 Voraussetzungen: Linux mit systemd (Ubuntu, Debian, Rocky, Alma, …), x86_64 oder ARM64.
 rsync, ffmpeg und poppler-utils werden bei Bedarf automatisch installiert.

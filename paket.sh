@@ -2,7 +2,7 @@
 # Baut das Installationspaket dist/web-dupplet.tar.gz (x86_64 + ARM64, statisch).
 set -e
 cd "$(dirname "$0")"
-export PATH="$HOME/.local/go/bin:$PATH"
+command -v go >/dev/null || export PATH="$HOME/.local/go/bin:$PATH"
 D=dist/web-dupplet
 rm -rf dist && mkdir -p "$D"
 for arch in amd64 arm64; do

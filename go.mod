@@ -1,4 +1,4 @@
-module web-dupplet
+module github.com/HolyRythen/web-dupplet
 
 go 1.26.11
 

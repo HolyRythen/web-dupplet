@@ -2,7 +2,10 @@
 *.db
 *.db-*
 *.log
-web-dupplet
+/web-dupplet
 web-dupplet-linux-*
 dist/
+
+# lokale Zugangsdaten nie einchecken
 .zugang
+.env
