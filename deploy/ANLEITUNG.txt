@@ -1,0 +1,37 @@
+WEB-DUPPLET – Installation auf einem neuen Server
+=================================================
+
+1) Paket auf den Server kopieren (vom eigenen Rechner aus):
+     scp web-dupplet.tar.gz benutzer@SERVER-IP:~
+
+2) Auf dem Server:
+     tar xzf web-dupplet.tar.gz
+     cd web-dupplet
+     sudo ./install.sh
+
+   → Am Ende werden Adresse, Benutzer und Passwort angezeigt.
+     (Passwort steht auch in /etc/web-dupplet.env)
+
+3) Testquellen starten (GWDG, bitsavers, CTAN – Millionen Dateien, alle Typen):
+     sudo /opt/web-dupplet/quellen-demo.sh
+
+4) Im Browser die angezeigte Adresse öffnen und zuschauen.
+
+Nützlich:
+  Live-Log:            journalctl -u web-dupplet -f
+  Neu starten:         sudo systemctl restart web-dupplet
+  Einstellungen:       sudo nano /etc/web-dupplet.env
+  Deinstallieren:      sudo ./uninstall.sh          (Daten bleiben)
+                       sudo ./uninstall.sh --alles  (alles weg)
+
+Ähnlichkeitsanalyse (Stufe 4, standardmäßig an):
+  Findet zusätzlich ähnliche Inhalte – Bilder in anderer Größe/anderem Format, Videos in anderer
+  Qualität, Texte als PDF/DOCX/HTML/TXT, Bilder in PDFs und Office-Dateien, Dateien in Archiven.
+  Einstellung in /etc/web-dupplet.env:  SIMILAR=-similar -analyze-workers 4 -sim-max 512
+  Abschalten: SIMILAR= (leer) und neu starten.
+  Achtung: Dafür werden Bilder, Dokumente und Archive komplett geladen (bis -sim-max MB).
+
+Voraussetzungen: Linux mit systemd (Ubuntu, Debian, Rocky, Alma, …), x86_64 oder ARM64.
+rsync, ffmpeg und poppler-utils werden bei Bedarf automatisch installiert.
+Daten liegen in /var/lib/web-dupplet (Datenbank ca. 200–300 Byte pro Datei,
+mit Ähnlichkeitsanalyse zusätzlich ca. 3–5 KB pro Bild/Video für Vorschaubilder).

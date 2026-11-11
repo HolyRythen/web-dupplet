@@ -21,7 +21,7 @@ type SimSide struct {
 	Dur   float64 `json:"dur,omitempty"`
 	Words int     `json:"words,omitempty"`
 	Snip  string  `json:"snip,omitempty"`
-	Thumb bool    `json:"thumb"`
+	Thumb int64   `json:"thumb,omitempty"` // fps.id mit Vorschaubild (0 = keins)
 }
 
 type SimPair struct {
@@ -37,13 +37,22 @@ func (e *Engine) side(fp int64) (s SimSide, err error) {
 	var dur sql.NullFloat64
 	var snip sql.NullString
 	var fkind int
-	var thumb int
-	err = e.rdb.QueryRow(`SELECT p.id, p.file_id, p.sub, p.kind, p.size, p.w, p.h, p.dur, p.words, p.snip,
-		f.loc, f.kind, (SELECT count(*) FROM thumbs t WHERE t.fp = p.id)
+	var thumb sql.NullInt64
+	// Vorschau/Textanfang notfalls vom Geschwister-Fingerabdruck derselben Datei bzw. desselben
+	// Archiv-Eintrags (exakte Treffer haben selbst keine Vorschau).
+	err = e.rdb.QueryRow(`SELECT p.id, p.file_id, p.sub, p.kind, p.size,
+		coalesce(p.w, (SELECT q.w FROM fps q WHERE q.file_id=p.file_id AND q.sub=p.sub AND q.w IS NOT NULL LIMIT 1)),
+		coalesce(p.h, (SELECT q.h FROM fps q WHERE q.file_id=p.file_id AND q.sub=p.sub AND q.h IS NOT NULL LIMIT 1)),
+		p.dur,
+		coalesce(p.words, (SELECT q.words FROM fps q WHERE q.file_id=p.file_id AND q.sub=p.sub AND q.words IS NOT NULL LIMIT 1)),
+		coalesce(p.snip, (SELECT q.snip FROM fps q WHERE q.file_id=p.file_id AND q.sub=p.sub AND q.snip IS NOT NULL LIMIT 1)),
+		f.loc, f.kind,
+		coalesce((SELECT t.fp FROM thumbs t WHERE t.fp = p.id),
+		         (SELECT t.fp FROM fps q JOIN thumbs t ON t.fp = q.id WHERE q.file_id=p.file_id AND q.sub=p.sub LIMIT 1))
 		FROM fps p JOIN files f ON f.id = p.file_id WHERE p.id = ?`, fp).
 		Scan(&s.FP, &s.File, &s.Sub, &s.Kind, &s.Size, &w, &h, &dur, &words, &snip, &s.Loc, &fkind, &thumb)
 	s.W, s.H, s.Dur, s.Words, s.Snip = int(w.Int64), int(h.Int64), dur.Float64, int(words.Int64), snip.String
-	s.Local, s.Thumb = fkind == kindLocal, thumb > 0
+	s.Local, s.Thumb = fkind == kindLocal, thumb.Int64
 	return
 }
 

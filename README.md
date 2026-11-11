@@ -54,6 +54,34 @@ Weitere Details:
 - Server ohne Range-Unterstützung werden erkannt (dann wird komplett geladen).
 - Nach einem Absturz/Neustart wird nichts doppelt geladen.
 
+## Stufe 4: Ähnliche Inhalte (`-similar`)
+
+Findet Dateien, die **inhaltlich gleich oder fast gleich** sind, auch wenn kein einziges Byte übereinstimmt.
+Ergebnisse stehen in der Web-UI unter „Ähnliche Inhalte“ (mit Vorschau nebeneinander und Prozentwert).
+
+| Art | Erkennt | Verfahren |
+|---|---|---|
+| Bilder (JPG, PNG, GIF, BMP, WebP, TIFF) | andere Auflösung, anderes Format, stärkere Kompression | pHash (DCT, 64 Bit) + dHash als Bestätigung |
+| Videos (MP4, MKV, WebM, AVI, MOV, …) | neu kodiert, andere Qualität/Auflösung/Container | pHash von 8 Einzelbildern (ffmpeg) + Länge ±2 % |
+| Texte, Office, PDF | gleicher oder fast gleicher Text in TXT/HTML/RTF/DOCX/ODT/PPTX/XLSX/PDF | SimHash über Wort-Dreiergruppen |
+| Bilder in PDFs und Office-Dateien | eingebettete Bilder, die es auch einzeln gibt | wie Bilder (pdfimages bzw. ZIP-Inhalt) |
+| Archive (ZIP, JAR, EPUB, TAR, TAR.GZ, TAR.BZ2) | Dateien, die verpackt und unverpackt vorkommen | SHA-256 je Eintrag + Inhaltsanalyse |
+
+Schwellen: Bilder ≤ 8 von 64 Bit (pHash) und ≤ 14 (dHash), Texte ≤ 7 Bit, Videos ≥ 75 % der Einzelbilder ≤ 10 Bit.
+Zum Vergleich: zufällig verschiedene Inhalte liegen bei etwa 32 Bit.
+
+- **Kosten:** Bilder, Dokumente und Archive werden komplett geladen (bis `-sim-max`, Standard 512 MB).
+  Videos nicht: ffmpeg springt per Range-Anfrage zu den Einzelbildern. Kann der Server keine Ranges,
+  wird das Video komplett geladen (ebenfalls bis `-sim-max`).
+- **Benötigt:** `ffmpeg` (Videos) und `poppler-utils` (PDFs). Fehlen sie, werden diese Typen übersprungen
+  und die Web-UI weist darauf hin. `install.sh` installiert beides.
+- **Nicht doppelt:** Byte-gleiche Dateien stehen in den Duplikat-Gruppen bzw. als „exakt, verpackt“ –
+  sie erscheinen nicht zusätzlich als „ähnlich“.
+- Eigene DB-Verbindung und eigene Worker (`-analyze-workers`), die Stufen 1–3 werden nicht ausgebremst.
+
+API: `GET /api/similar?kind=0..4&offset=&limit=` (1 Bild, 2 Text, 3 Video, 4 Archiv), `GET /api/thumb?fp=`,
+`GET /api/similar.csv`, Zahlen unter `sim` in `/api/stats`.
+
 ## Optionen
 
 | Option | Standard | Bedeutung |
@@ -74,6 +102,10 @@ Weitere Details:
 | `-ext` | * | Dateitypen für `-crawl`: `*` = alle, oder `word`, `bilder`, `videos`, `audio`, `office`, `archive`, bzw. Endungen wie `pdf,docx,jpg` |
 | `-timeout` | 60s | Abbruch, wenn so lange keine Daten kommen |
 | `-retries` | 3 | Versuche bei vorübergehenden Fehlern |
+| `-similar` | aus | Stufe 4: ähnliche Inhalte finden (siehe oben) |
+| `-analyze-workers` | 4 | Parallele Ähnlichkeitsanalysen (CPU-lastig) |
+| `-sim-max` | 512 | Größere Dateien (MB) nicht für die Ähnlichkeit laden |
+| `-video-frames` | 8 | Einzelbilder pro Video |
 
 Größenordnung für 100 TB: Die Datenbank braucht ca. 150–250 Byte pro Datei
 (10 Mio. Dateien ≈ 2–3 GB). Der eigentliche Engpass ist die Netzwerkanbindung.
@@ -91,6 +123,8 @@ Größenordnung für 100 TB: Die Datenbank braucht ca. 150–250 Byte pro Datei
 ## Neu bauen
 
 ```bash
-./build.sh
+./build.sh          # nur für diesen Rechner
+./paket.sh          # Installationspaket dist/web-dupplet.tar.gz (x86_64 + ARM64)
+go test ./...       # Tests (Video-Test braucht ffmpeg)
 ```
 Go liegt unter `~/.local/go` (ohne Root installiert).

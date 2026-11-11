@@ -325,7 +325,7 @@ function side(x){
   if(x.dur) meta.push(dur(x.dur).replace(/^0 min$/,Math.round(x.dur)+' s'));
   if(x.words) meta.push(n(x.words)+' Wörter');
   return `<div class="side">
-    ${x.thumb?`<img src="api/thumb?fp=${x.fp}" alt="" loading="lazy">`:''}
+    ${x.thumb?`<img src="api/thumb?fp=${x.thumb}" alt="" loading="lazy">`:''}
     ${x.snip?`<div class="snip">${esc(x.snip)}</div>`:''}
     <div class="loc">${loc}</div>
     ${x.sub?`<div class="in">↳ ${esc(x.sub)}</div>`:''}

@@ -30,12 +30,18 @@ install -m 644 README.md "$APP/README.md" 2>/dev/null || true
 install -m 755 quellen-demo.sh "$APP/quellen-demo.sh"
 install -d -m 750 -o dupplet -g dupplet "$DATA" "$DATA/store"
 
-echo "==> rsync prüfen (für rsync://-Quellen)"
-if ! command -v rsync >/dev/null; then
-  if command -v apt-get >/dev/null; then apt-get install -y -q rsync >/dev/null
-  elif command -v dnf >/dev/null; then dnf install -y -q rsync
-  elif command -v yum >/dev/null; then yum install -y -q rsync
-  else echo "   Hinweis: rsync bitte manuell installieren"; fi
+echo "==> Hilfsprogramme prüfen (rsync für rsync://-Quellen, ffmpeg + poppler-utils für die Ähnlichkeitsanalyse)"
+need=""
+command -v rsync     >/dev/null || need="$need rsync"
+command -v ffmpeg    >/dev/null || need="$need ffmpeg"
+command -v pdftotext >/dev/null || need="$need poppler-utils"
+if [ -n "$need" ]; then
+  if command -v apt-get >/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $need >/dev/null \
+      || { apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $need >/dev/null; }
+  elif command -v dnf >/dev/null; then dnf install -y -q $need
+  elif command -v yum >/dev/null; then yum install -y -q $need
+  else echo "   Hinweis: bitte manuell installieren:$need"; fi
 fi
 
 if [ ! -f "$ENVF" ]; then
@@ -47,12 +53,19 @@ LISTEN=0.0.0.0:$PORT
 AUTH=admin:$PW
 # Abgestimmt auf 1 Gbit/s und mehrere Kerne:
 WORKERS=-fetch-workers 256 -probe-workers 128 -per-host 24 -probe-per-host 16 -local-workers 8
+# Stufe 4 – ähnliche Inhalte (Bilder, Videos, Texte, PDFs, Office, Archive). Leer lassen = aus.
+SIMILAR=-similar -analyze-workers 4 -sim-max 512
 # Weitere Optionen, z.B. Dateien behalten:  EXTRA=-store $DATA/store
 EXTRA=
 CONF
   chmod 600 "$ENVF"
 else
   echo "==> Bestehende Konfiguration $ENVF bleibt erhalten"
+  if ! grep -q '^SIMILAR=' "$ENVF"; then
+    echo "==> Ähnlichkeitsanalyse in $ENVF ergänzt (SIMILAR=…; leer setzen zum Abschalten)"
+    printf '%s\n' '# Stufe 4 – ähnliche Inhalte (Bilder, Videos, Texte, PDFs, Office, Archive). Leer lassen = aus.' \
+      'SIMILAR=-similar -analyze-workers 4 -sim-max 512' >> "$ENVF"
+  fi
 fi
 
 echo "==> systemd-Dienst einrichten"
@@ -67,7 +80,7 @@ User=dupplet
 Group=dupplet
 EnvironmentFile=$ENVF
 WorkingDirectory=$DATA
-ExecStart=$APP/web-dupplet -db $DATA/dupplet.db -listen \${LISTEN} -auth \${AUTH} \$WORKERS \$EXTRA
+ExecStart=$APP/web-dupplet -db $DATA/dupplet.db -listen \${LISTEN} -auth \${AUTH} \$WORKERS \$SIMILAR \$EXTRA
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT
