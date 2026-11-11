@@ -19,31 +19,32 @@ import (
 var uiFS embed.FS
 
 type Stats struct {
-	Total         int64   `json:"total"`
-	Checked       int64   `json:"checked"`
-	Pending       int64   `json:"pending"`
-	Active        int64   `json:"active"`
-	UniqueSize    int64   `json:"uniqueSize"`
-	UniquePartial int64   `json:"uniquePartial"`
-	Hashed        int64   `json:"hashed"`
-	Errors        int64   `json:"errors"`
-	NeedProbe     int64   `json:"needProbe"`
-	NeedPartial   int64   `json:"needPartial"`
-	NeedFull      int64   `json:"needFull"`
-	KnownBytes    int64   `json:"knownBytes"`
-	SavedBytes    int64   `json:"savedBytes"`
-	DupGroups     int64   `json:"dupGroups"`
-	DupFiles      int64   `json:"dupFiles"`
-	Redundant     int64   `json:"redundant"`
-	Wasted        int64   `json:"wasted"`
-	BytesRead     int64   `json:"bytesRead"`
-	Rate          float64 `json:"rate"`
-	FilesRate     float64 `json:"filesRate"`
-	Paused        bool    `json:"paused"`
-	Scanning      int32   `json:"scanning"`
-	Uptime        int64   `json:"uptime"`
-	StatsMs       int64   `json:"statsMs"`
-	Mode          string  `json:"mode"`
+	Total         int64     `json:"total"`
+	Checked       int64     `json:"checked"`
+	Pending       int64     `json:"pending"`
+	Active        int64     `json:"active"`
+	UniqueSize    int64     `json:"uniqueSize"`
+	UniquePartial int64     `json:"uniquePartial"`
+	Hashed        int64     `json:"hashed"`
+	Errors        int64     `json:"errors"`
+	NeedProbe     int64     `json:"needProbe"`
+	NeedPartial   int64     `json:"needPartial"`
+	NeedFull      int64     `json:"needFull"`
+	KnownBytes    int64     `json:"knownBytes"`
+	SavedBytes    int64     `json:"savedBytes"`
+	DupGroups     int64     `json:"dupGroups"`
+	DupFiles      int64     `json:"dupFiles"`
+	Redundant     int64     `json:"redundant"`
+	Wasted        int64     `json:"wasted"`
+	BytesRead     int64     `json:"bytesRead"`
+	Rate          float64   `json:"rate"`
+	FilesRate     float64   `json:"filesRate"`
+	Paused        bool      `json:"paused"`
+	Scanning      int32     `json:"scanning"`
+	Uptime        int64     `json:"uptime"`
+	StatsMs       int64     `json:"statsMs"`
+	Mode          string    `json:"mode"`
+	Sim           *SimStats `json:"sim,omitempty"`
 }
 
 // statsLoop: Zählt die Tabelle über den abdeckenden Index (kein Tabellenzugriff).
@@ -89,6 +90,10 @@ func (e *Engine) statsLoop(ctx context.Context) {
 		}
 		if e.cfg.Store != "" {
 			s.Mode += " + speichern"
+		}
+		if e.an != nil {
+			s.Mode += " + Ähnlichkeit"
+			s.Sim = e.an.stats(s)
 		}
 		e.statsMu.Lock()
 		e.stats = s
@@ -289,6 +294,8 @@ func (e *Engine) Handler() http.Handler {
 		e.paused.Store(r.URL.Query().Get("on") == "1")
 		writeJSON(w, map[string]bool{"paused": e.paused.Load()})
 	})
+
+	e.similarHandlers(mux)
 
 	if e.cfg.Auth == "" {
 		return mux

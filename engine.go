@@ -28,6 +28,12 @@ type Config struct {
 	Full                               bool
 	Crawls                             []string
 	Exts                               string
+
+	// Stufe 4: Ähnlichkeitsanalyse
+	Similar        bool
+	AnalyzeWorkers int
+	SimMaxMB       int
+	VideoFrames    int
 }
 
 const (
@@ -94,6 +100,7 @@ type Engine struct {
 
 	crawls crawlReg
 	ctx    context.Context
+	an     *Analyzer // nil = Ähnlichkeitsanalyse aus
 
 	statsMu sync.RWMutex
 	stats   Stats
@@ -136,6 +143,17 @@ func (e *Engine) Run(ctx context.Context) {
 	spawn(e.cfg.LocalWorkers, e.localQ)
 
 	e.ctx = ctx
+	anDone := make(chan struct{})
+	if e.cfg.Similar {
+		a, err := newAnalyzer(e)
+		if err != nil {
+			log.Fatalf("Ähnlichkeitsanalyse: %v", err)
+		}
+		e.an = a
+		go func() { a.run(ctx); close(anDone) }()
+	} else {
+		close(anDone)
+	}
 	go e.statsLoop(ctx)
 	go e.resumeCrawls(ctx)
 	for _, f := range e.cfg.URLFiles {
@@ -147,6 +165,7 @@ func (e *Engine) Run(ctx context.Context) {
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	e.core(ctx, done)
+	<-anDone
 }
 
 // ---------- Core: einziger Schreiber, trifft alle Entscheidungen ----------

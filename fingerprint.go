@@ -325,9 +325,12 @@ func toUTF8(b []byte) string {
 // Pro Suche werden also nur die Einträge mit einem gleichen Byte geprüft (≈ 8/256 aller Einträge).
 
 type mihEntry struct {
-	fp  int64  // fps.id
-	h   uint64 // Hash
-	aux uint64 // Zweit-Hash (dHash) bzw. Bildnummer bei Videos
+	fp   int64  // fps.id
+	file int64  // files.id (Treffer in derselben Datei werden ignoriert)
+	h    uint64 // Hash
+	aux  uint64 // Zweit-Hash (dHash) bzw. Bildnummer bei Videos
+	cs   uint64 // Anfang des SHA-256 der Bytes (0 = unbekannt)
+	ex   bool   // Byte-Gleichheit wird schon anderswo gemeldet (ganze Datei oder Archiv-Eintrag)
 }
 
 type mih struct {
